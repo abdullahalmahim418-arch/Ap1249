@@ -20,20 +20,22 @@ async function resolveAlId(anilistId?: string, malId?: string): Promise<number |
 }
 
 async function fetchEpisodes(source: Source, siteIds: any): Promise<{ episodes: any[]; siteId: string; error?: string }> {
-  const zoroId = siteIds.siteIds?.zoro as string | undefined;
+  const senshiId = (siteIds.siteIds?.senshi ?? siteIds.siteIds?.zoro) as string | undefined;
+  const daoId = (siteIds.siteIds?.anidao ?? siteIds.siteIds?.zoro) as string | undefined;
+  const waveId = (siteIds.siteIds?.wave ?? siteIds.siteIds?.zoro) as string | undefined;
   const paheId = siteIds.siteIds?.animepahe as string | undefined;
 
   if (source === 'senshi') {
-    if (!zoroId) return { episodes: [], siteId: '', error: 'Not indexed on Senshi' };
-    return { episodes: await getEpisodes(zoroId), siteId: zoroId };
+    if (!senshiId) return { episodes: [], siteId: '', error: 'Not indexed on Senshi' };
+    return { episodes: await getEpisodes(senshiId), siteId: senshiId };
   }
   if (source === 'dao') {
-    if (!zoroId) return { episodes: [], siteId: '', error: 'Not indexed on AniDao' };
-    return { episodes: await getDaoEpisodes(zoroId), siteId: zoroId };
+    if (!daoId) return { episodes: [], siteId: '', error: 'Not indexed on AniDao' };
+    return { episodes: await getDaoEpisodes(daoId), siteId: daoId };
   }
   if (source === 'wave') {
-    if (!zoroId) return { episodes: [], siteId: '', error: 'Not indexed on AniWaves' };
-    return { episodes: await getWaveEpisodes(zoroId), siteId: zoroId };
+    if (!waveId) return { episodes: [], siteId: '', error: 'Not indexed on AniWaves' };
+    return { episodes: await getWaveEpisodes(waveId), siteId: waveId };
   }
   if (source === 'animepahe') {
     if (!paheId) return { episodes: [], siteId: '', error: 'Not indexed on AnimePahe' };
