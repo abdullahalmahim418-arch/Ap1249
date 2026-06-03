@@ -6,6 +6,11 @@ const BASE = 'https://anidao.to';
 const http = makeClient(BASE, BASE + '/');
 const ajax = makeAjaxClient(BASE, BASE + '/');
 
+function normalizeWatchUrl(url: string): string {
+  if (!url) return url;
+  return url.replace(/(\/watch-online\/[^/]+)-\d+(-episode-\d+)$/i, '$1$2');
+}
+
 export interface DaoEpisode {
   num: number;
   id: string;
@@ -52,8 +57,7 @@ export async function getDaoEpisodes(animeId: string): Promise<DaoEpisode[]> {
     if (!href || !num || href === '#') return;
     const title = text || `Episode ${num}`;
     const current = byEpisode.get(num);
-    const hasStaleBlock = /\/watch-online\/[^/]+-\d+-episode-\d+$/i.test(href);
-    const normalizedHref = hasStaleBlock ? `/watch-online/${animeId}-episode-${num}` : href;
+    const normalizedHref = normalizeWatchUrl(href);
     const isPreferred = /\/watch-online\/[^/]+-episode-\d+$/i.test(normalizedHref)
       && !/\/watch-online\/[^/]+-\d+-episode-\d+$/i.test(normalizedHref);
     const currentIsPreferred = current ? /\/watch-online\/[^/]+-episode-\d+$/i.test(current.id)
@@ -71,8 +75,16 @@ export async function getDaoEpisodes(animeId: string): Promise<DaoEpisode[]> {
 
 // Get servers for an episode
 export async function getDaoServers(episodeId: string): Promise<DaoServer[]> {
-  const res = await http.get(episodeId);
-  const $ = cheerio.load(res.data);
+  const normalizedEpisodeId = normalizeWatchUrl(episodeId);
+  let res = await http.get(normalizedEpisodeId);
+  if (res.data === 404 || String(res.data).trim() === '404') {
+    res = await http.get(normalizeWatchUrl(normalizedEpisodeId));
+  }
+
+  const html = typeof res.data === 'string' ? res.data : '';
+  if (!html || html.includes('Pages not found')) return [];
+
+  const $ = cheerio.load(html);
   const servers: DaoServer[] = [];
 
   $('[data-an-video]').each((_, el) => {

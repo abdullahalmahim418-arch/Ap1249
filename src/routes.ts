@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import axios from 'axios';
 import { malToAnilist, getSiteIds, searchAnilist } from './utils/mapper';
 import { cacheStats } from './utils/cache';
 import { resolveEmbed } from './resolvers/megacloud';
@@ -12,6 +13,21 @@ const router = Router();
 
 const SOURCES = ['senshi', 'dao', 'wave', 'animepahe'] as const;
 type Source = typeof SOURCES[number];
+
+function proxiedHlsUrl(req: Request, url: string): string {
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol).split(',')[0];
+  const origin = `${proto}://${req.get('host')}`;
+  return `${origin}/api/proxy/hls?url=${encodeURIComponent(url)}`;
+}
+
+function rewriteHlsPlaylist(req: Request, playlistUrl: string, body: string): string {
+  return body.split(/\r?\n/).map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return line;
+    const absolute = new URL(trimmed, playlistUrl).toString();
+    return proxiedHlsUrl(req, absolute);
+  }).join('\n');
+}
 
 async function resolveAlId(anilistId?: string, malId?: string): Promise<number | null> {
   if (anilistId) return parseInt(anilistId);
@@ -53,6 +69,42 @@ router.get('/search', async (req: Request, res: Response) => {
     return res.json({ query: q, count: results.length, results });
   } catch (e) {
     return res.status(500).json({ error: 'Search failed', detail: String(e) });
+  }
+});
+
+router.get('/proxy/hls', async (req: Request, res: Response) => {
+  const target = String(req.query.url || '');
+  if (!target || !/^https?:\/\//i.test(target)) {
+    return res.status(400).json({ error: 'Missing or invalid ?url=' });
+  }
+
+  try {
+    const upstream = await axios.get<ArrayBuffer>(target, {
+      responseType: 'arraybuffer',
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        'Referer': 'https://senshi.live/',
+        'Origin': 'https://senshi.live',
+        'Accept': '*/*',
+      },
+      timeout: 20000,
+    });
+
+    const contentType = String(upstream.headers['content-type'] || '');
+    const isPlaylist = /\.m3u8(\?|$)/i.test(target) || contentType.includes('mpegurl');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', isPlaylist ? 'no-store' : 'public, max-age=300');
+
+    if (isPlaylist) {
+      const body = Buffer.from(upstream.data).toString('utf8');
+      res.type('application/vnd.apple.mpegurl');
+      return res.send(rewriteHlsPlaylist(req, target, body));
+    }
+
+    if (contentType) res.type(contentType);
+    return res.send(Buffer.from(upstream.data));
+  } catch (e) {
+    return res.status(502).json({ error: 'HLS proxy failed', detail: String(e) });
   }
 });
 
@@ -185,12 +237,15 @@ async function watchHandler(req: Request, res: Response) {
     if (!embedResult) return res.status(502).json({ error: 'All servers failed' });
 
     const stream = await resolveEmbed(embedResult.embedUrl);
+    const m3u8 = stream?.m3u8
+      ? (source === 'senshi' ? proxiedHlsUrl(req, stream.m3u8) : stream.m3u8)
+      : null;
     return res.json({
       anilistId: alId, malId: siteIds.malId, title: siteIds.title,
       episode: epNum, type, source, server: usedServer,
       availableServers: filtered.map((s: any) => s.name),
       embedUrl: embedResult.embedUrl,
-      m3u8: stream?.m3u8 ?? null,
+      m3u8,
       subtitles: stream?.subtitles ?? [],
       intro: stream?.intro ?? null,
       outro: stream?.outro ?? null,
