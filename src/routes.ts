@@ -20,7 +20,7 @@ async function resolveAlId(anilistId?: string, malId?: string): Promise<number |
 }
 
 async function fetchEpisodes(source: Source, siteIds: any): Promise<{ episodes: any[]; siteId: string; error?: string }> {
-  const senshiId = (siteIds.siteIds?.senshi ?? siteIds.siteIds?.zoro) as string | undefined;
+  const senshiId = siteIds.siteIds?.senshi as string | undefined;
   const daoId = (siteIds.siteIds?.anidao ?? siteIds.siteIds?.zoro) as string | undefined;
   const waveId = (siteIds.siteIds?.wave ?? siteIds.siteIds?.zoro) as string | undefined;
   const paheId = siteIds.siteIds?.animepahe as string | undefined;

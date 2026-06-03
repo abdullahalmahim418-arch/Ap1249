@@ -43,19 +43,27 @@ export async function getDaoEpisodes(animeId: string): Promise<DaoEpisode[]> {
   const res = await http.get(`/anime/${animeId}`);
   const $ = cheerio.load(res.data);
 
-  const episodes: DaoEpisode[] = [];
-  const seen = new Set<number>();
+  const byEpisode = new Map<number, DaoEpisode>();
   $('a[href*="/watch-online/"]').each((_, el) => {
     const href = $(el).attr('href') ?? '';
     const text = ($(el).attr('aria-label') ?? $(el).text()).trim();
     const match = /episode-(\d+)/i.exec(href) ?? /episode\s+(\d+)/i.exec(text);
     const num = match ? parseInt(match[1]) : 0;
-    if (!href || !num || seen.has(num)) return;
-    seen.add(num);
+    if (!href || !num || href === '#') return;
     const title = text || `Episode ${num}`;
-    episodes.push({ num, id: href, title });
+    const current = byEpisode.get(num);
+    const hasStaleBlock = /\/watch-online\/[^/]+-\d+-episode-\d+$/i.test(href);
+    const normalizedHref = hasStaleBlock ? `/watch-online/${animeId}-episode-${num}` : href;
+    const isPreferred = /\/watch-online\/[^/]+-episode-\d+$/i.test(normalizedHref)
+      && !/\/watch-online\/[^/]+-\d+-episode-\d+$/i.test(normalizedHref);
+    const currentIsPreferred = current ? /\/watch-online\/[^/]+-episode-\d+$/i.test(current.id)
+      && !/\/watch-online\/[^/]+-\d+-episode-\d+$/i.test(current.id) : false;
+    if (!current || (isPreferred && !currentIsPreferred)) {
+      byEpisode.set(num, { num, id: normalizedHref, title });
+    }
   });
 
+  const episodes = [...byEpisode.values()];
   episodes.sort((a, b) => a.num - b.num);
   if (episodes.length > 0) cacheSet(cacheKey, episodes, 'episodes');
   return episodes;

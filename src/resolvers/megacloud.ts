@@ -126,6 +126,14 @@ export async function resolveVidstreaming(embedUrl: string): Promise<StreamResul
 
 // Generic resolver — detects which resolver to use based on URL
 export async function resolveEmbed(embedUrl: string): Promise<StreamResult | null> {
+  if (/\.m3u8(\?|$)/i.test(embedUrl)) {
+    return {
+      m3u8: embedUrl,
+      type: 'hls',
+      subtitles: [],
+    };
+  }
+
   if (embedUrl.includes('megacloud') || embedUrl.includes('e-1')) {
     return resolveMegacloud(embedUrl);
   }

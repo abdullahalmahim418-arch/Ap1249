@@ -25,17 +25,40 @@ export interface EmbedResult {
   type: string;
 }
 
-// Search senshi for an anime by title — returns slug/id
+function senshiType(status: string): SenshiServer['type'] {
+  return status.toLowerCase().includes('dub') ? 'dub' : 'sub';
+}
+
+async function getInternalAnimeId(animeId: string): Promise<string> {
+  if (/^\d+$/.test(animeId)) return animeId;
+  const res = await http.get(`/anime/${animeId}`, {
+    headers: { Accept: 'application/json' },
+  });
+  return String(res.data?.id ?? animeId);
+}
+
 export async function searchSenshi(query: string): Promise<{ title: string; id: string; url: string }[]> {
+  try {
+    const res = await http.post('/anime/filter', { searchTerm: query, page: 1, limit: 10 }, {
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    });
+    const rows = res.data?.data ?? [];
+    return rows.map((anime: any) => {
+      const id = String(anime.public_id ?? anime.id ?? '');
+      const title = anime.title ?? anime.title_english ?? anime.name ?? anime.romaji_title ?? '';
+      return { title, id, url: `${BASE}/watch/${id}/1` };
+    }).filter((anime: any) => anime.title && anime.id);
+  } catch {
+    // Fall through to the legacy HTML scraper.
+  }
+
   const res = await http.get('/search', { params: { keyword: query } });
   const $ = cheerio.load(res.data);
   const results: { title: string; id: string; url: string }[] = [];
 
-  // HiAnime-style selectors — adjust if Senshi differs
   $('.flw-item .film-name a, [class*="film-detail"] h3 a').each((_, el) => {
     const href = $(el).attr('href') ?? '';
     const title = $(el).text().trim();
-    // ID is the last path segment without query string, e.g. /watch/naruto-123 → naruto-123
     const id = href.split('/').filter(Boolean).pop()?.split('?')[0] ?? '';
     if (title && id) results.push({ title, id, url: BASE + href });
   });
@@ -43,72 +66,52 @@ export async function searchSenshi(query: string): Promise<{ title: string; id: 
   return results;
 }
 
-// Get episode list for a zoro-style anime ID
 export async function getEpisodes(animeId: string): Promise<SenshiEpisode[]> {
   const cacheKey = `senshi:eps:${animeId}`;
   const cached = cacheGet<SenshiEpisode[]>(cacheKey);
   if (cached) return cached;
 
-  // Zoro/HiAnime-style: extract numeric part of ID for AJAX call
-  // e.g. "naruto-225" → 225 for /ajax/v2/episode/list/225
-  const numericId = (animeId.split('-').pop() || animeId) as string;
-
-  const res = await ajax.get(`/ajax/v2/episode/list/${numericId}`);
-  const html = (res.data?.html || (typeof res.data === 'string' ? res.data : ''));
-  const $ = cheerio.load(html);
-
-  const episodes: SenshiEpisode[] = [];
-
-  $('a[data-id], a[href*="/watch/"]').each((_, el) => {
-    const id = $(el).attr('data-id') ?? '';
-    const num = parseInt($(el).attr('data-number') ?? $(el).attr('data-ep-num') ?? '0');
-    const title = ($(el).attr('title') ?? $(el).text().trim()) || `Episode ${num}`;
-    if (id && num > 0) episodes.push({ num, id, title });
+  const internalId = await getInternalAnimeId(animeId);
+  const res = await http.get(`/episodes/${internalId}`, {
+    headers: { Accept: 'application/json' },
   });
+
+  const episodes: SenshiEpisode[] = (Array.isArray(res.data) ? res.data : []).map((ep: any) => ({
+    num: Number(ep.ep_id),
+    id: `${internalId}:${ep.ep_id}`,
+    title: ep.ep_title || `Episode ${ep.ep_id}`,
+  })).filter((ep) => ep.num > 0);
 
   if (episodes.length > 0) cacheSet(cacheKey, episodes, 'episodes');
   return episodes;
 }
 
-// Get available servers for a specific episode
 export async function getServers(episodeId: string): Promise<SenshiServer[]> {
-  const res = await ajax.get('/ajax/v2/episode/servers', {
-    params: { episodeId },
+  const [animeId, ep] = episodeId.split(':');
+  const res = await http.get(`/episode-embeds/${animeId}/${ep}`, {
+    headers: { Accept: 'application/json' },
   });
 
-  const html = (res.data?.html || (typeof res.data === 'string' ? res.data : ''));
-  const $ = cheerio.load(html);
-  const servers: SenshiServer[] = [];
-
-  // Sub servers
-  $('[data-type="sub"] .server-item, .servers-sub .item, [class*="sub"] li[data-id]').each((_, el) => {
-    const sourceId = $(el).attr('data-id') ?? '';
-    const serverId = $(el).attr('data-server-id') ?? '';
-    const name = $(el).text().trim() || 'Server';
-    if (sourceId) servers.push({ name, serverId, sourceId, type: 'sub' });
+  return (Array.isArray(res.data) ? res.data : []).flatMap((embed: any, index: number) => {
+    const urls = [embed.url, embed.server2, embed.serverFM].filter(Boolean);
+    return urls.map((url: string, urlIndex: number) => ({
+      name: embed.status || `Server ${index + 1}`,
+      serverId: `${index}-${urlIndex}`,
+      sourceId: url,
+      type: senshiType(embed.status || ''),
+    }));
   });
-
-  // Dub servers
-  $('[data-type="dub"] .server-item, .servers-dub .item, [class*="dub"] li[data-id]').each((_, el) => {
-    const sourceId = $(el).attr('data-id') ?? '';
-    const serverId = $(el).attr('data-server-id') ?? '';
-    const name = $(el).text().trim() || 'Server';
-    if (sourceId) servers.push({ name, serverId, sourceId, type: 'dub' });
-  });
-
-  // Raw servers
-  $('[data-type="raw"] .server-item, .servers-raw .item, [class*="raw"] li[data-id]').each((_, el) => {
-    const sourceId = $(el).attr('data-id') ?? '';
-    const serverId = $(el).attr('data-server-id') ?? '';
-    const name = $(el).text().trim() || 'Server';
-    if (sourceId) servers.push({ name, serverId, sourceId, type: 'raw' });
-  });
-
-  return servers;
 }
 
-// Resolve a sourceId to an embed URL
 export async function getEmbedUrl(sourceId: string): Promise<EmbedResult | null> {
+  if (/^https?:\/\//i.test(sourceId)) {
+    return {
+      embedUrl: sourceId,
+      serverName: new URL(sourceId).hostname,
+      type: sourceId.includes('.m3u8') ? 'hls' : 'iframe',
+    };
+  }
+
   try {
     const res = await ajax.get('/ajax/v2/episode/sources', {
       params: { id: sourceId },
@@ -124,7 +127,6 @@ export async function getEmbedUrl(sourceId: string): Promise<EmbedResult | null>
       };
     }
 
-    // Some sites wrap it differently
     if (data?.url) {
       return { embedUrl: data.url, serverName: 'server', type: 'iframe' };
     }
