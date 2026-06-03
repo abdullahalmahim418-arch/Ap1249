@@ -1,0 +1,138 @@
+import axios from 'axios';
+import { anilistClient } from './fetch';
+import { cacheGet, cacheSet } from './cache';
+
+export interface SiteIds {
+  anilistId: number;
+  malId: number | null;
+  title: string;
+  siteIds: {
+    zoro?: string;       // senshi.live uses zoro-style IDs
+    gogoanime?: string;
+    animepahe?: string;
+    anidao?: string;
+  };
+}
+
+// MAL ID → AniList ID via AniList GraphQL
+export async function malToAnilist(malId: number): Promise<number | null> {
+  const cacheKey = `mal2al:${malId}`;
+  const cached = cacheGet<number>(cacheKey);
+  if (cached) return cached;
+
+  const query = `
+    query ($malId: Int) {
+      Media(idMal: $malId, type: ANIME) {
+        id
+        idMal
+        title { romaji english }
+      }
+    }
+  `;
+
+  const res = await anilistClient.post('', { query, variables: { malId } });
+  const id = res.data?.data?.Media?.id ?? null;
+  if (id) cacheSet(cacheKey, id);
+  return id;
+}
+
+// AniList ID → anime metadata + site-specific IDs via Anify
+export async function getSiteIds(anilistId: number): Promise<SiteIds | null> {
+  const cacheKey = `siteids:${anilistId}`;
+  const cached = cacheGet<SiteIds>(cacheKey);
+  if (cached) return cached;
+
+  // Try Anify first
+  try {
+    const res = await axios.get(`https://api.anify.tv/info/${anilistId}`, {
+      params: { fields: 'id,title,mappings,coverImage,episodes' },
+      timeout: 10000,
+    });
+
+    const data = res.data;
+    const mappings: any[] = data?.mappings ?? [];
+
+    const result: SiteIds = {
+      anilistId,
+      malId: null,
+      title: data?.title?.english ?? data?.title?.romaji ?? 'Unknown',
+      siteIds: {},
+    };
+
+    for (const m of mappings) {
+      if (m.providerId === 'zoro')      result.siteIds.zoro = m.id;
+      if (m.providerId === 'gogoanime') result.siteIds.gogoanime = m.id;
+      if (m.providerId === 'animepahe') result.siteIds.animepahe = m.id;
+      if (m.providerId === 'mal')       result.malId = parseInt(m.id);
+    }
+
+    cacheSet(cacheKey, result);
+    return result;
+  } catch (e) {
+    // Fallback: try AniList for title at least
+    try {
+      const query = `
+        query ($id: Int) {
+          Media(id: $id, type: ANIME) {
+            id idMal
+            title { romaji english }
+          }
+        }
+      `;
+      const res = await anilistClient.post('', { query, variables: { id: anilistId } });
+      const media = res.data?.data?.Media;
+      if (!media) return null;
+
+      const result: SiteIds = {
+        anilistId,
+        malId: media.idMal ?? null,
+        title: media.title?.english ?? media.title?.romaji ?? 'Unknown',
+        siteIds: {},
+      };
+      return result;
+    } catch {
+      return null;
+    }
+  }
+}
+
+// Search AniList by title → return anilistId + malId
+export async function searchAnilist(query: string): Promise<{
+  id: number; malId: number | null; title: string; coverImage: string; episodes: number | null;
+}[]> {
+  const cacheKey = `alsearch:${query.toLowerCase().trim()}`;
+  const cached = cacheGet<any[]>(cacheKey);
+  if (cached) return cached;
+
+  const gql = `
+    query ($search: String) {
+      Page(page: 1, perPage: 10) {
+        media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+          id
+          idMal
+          episodes
+          title { romaji english }
+          coverImage { large medium }
+          status
+          format
+        }
+      }
+    }
+  `;
+
+  const res = await anilistClient.post('', { query: gql, variables: { search: query } });
+  const list = res.data?.data?.Page?.media ?? [];
+
+  const results = list.map((m: any) => ({
+    id: m.id,
+    malId: m.idMal ?? null,
+    title: m.title?.english ?? m.title?.romaji,
+    coverImage: m.coverImage?.large ?? m.coverImage?.medium ?? '',
+    episodes: m.episodes ?? null,
+    status: m.status,
+    format: m.format,
+  }));
+
+  cacheSet(cacheKey, results, 'episodes');
+  return results;
+}
