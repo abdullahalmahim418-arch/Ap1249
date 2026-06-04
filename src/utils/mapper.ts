@@ -2,199 +2,149 @@ import axios from 'axios';
 import { anilistClient } from './fetch';
 import { cacheGet, cacheSet } from './cache';
 import { searchAnimePahe } from '../scrapers/animepahe';
-import { searchAniDao } from '../scrapers/anidao';
-import { searchAniWaves } from '../scrapers/aniwaves';
-import { searchSenshi } from '../scrapers/senshi';
 
 export interface SiteIds {
   anilistId: number;
   malId: number | null;
   title: string;
   siteIds: {
-    zoro?: string;       // senshi.live uses zoro-style IDs
-    senshi?: string;
-    wave?: string;
+    zoro?: string;
     gogoanime?: string;
     animepahe?: string;
     anidao?: string;
   };
 }
 
-interface AniListMeta {
-  malId: number | null;
-  title: string;
-  titles: string[];
-}
-
-function normalizeTitle(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/&/g, 'and')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-    .replace(/\s+/g, ' ');
-}
-
-function bestMatch<T extends { title: string }>(items: T[], titles: string[]): T | undefined {
-  const normalizedTitles = titles.map(normalizeTitle).filter(Boolean);
-  return items.find((item) => normalizedTitles.includes(normalizeTitle(item.title)))
-      ?? items.find((item) => normalizedTitles.some((title) => normalizeTitle(item.title).startsWith(title)));
-}
-
-async function getAniListMeta(anilistId: number): Promise<AniListMeta | null> {
-  const query = `
-    query ($id: Int) {
-      Media(id: $id, type: ANIME) {
-        id idMal
-        title { romaji english native }
-      }
-    }
-  `;
-  const res = await anilistClient.post('', { query, variables: { id: anilistId } });
-  const media = res.data?.data?.Media;
-  if (!media) return null;
-
-  const titles = [
-    media.title?.english,
-    media.title?.romaji,
-    media.title?.native,
-  ].filter(Boolean);
-
-  return {
-    malId: media.idMal ?? null,
-    title: titles[0] ?? 'Unknown',
-    titles,
-  };
-}
-
-async function enrichFromProviderSearch(result: SiteIds, titles: string[]): Promise<void> {
-  const query = result.title;
-
-  const lookups = await Promise.allSettled([
-    searchAniWaves(query),
-    searchAniDao(query),
-    searchAnimePahe(query),
-    searchSenshi(query),
-  ]);
-
-  const wave = lookups[0].status === 'fulfilled' ? bestMatch(lookups[0].value, titles) : undefined;
-  if (wave?.id) {
-    result.siteIds.wave = wave.id;
-    result.siteIds.zoro = result.siteIds.zoro ?? wave.id;
-  }
-
-  const dao = lookups[1].status === 'fulfilled' ? bestMatch(lookups[1].value, titles) : undefined;
-  if (dao?.id) result.siteIds.anidao = dao.id;
-
-  const pahe = lookups[2].status === 'fulfilled' ? bestMatch(lookups[2].value, titles) : undefined;
-  if (pahe?.session) result.siteIds.animepahe = pahe.session;
-
-  const senshi = lookups[3].status === 'fulfilled' ? bestMatch(lookups[3].value, titles) : undefined;
-  if (senshi?.id) result.siteIds.senshi = senshi.id;
-}
-
-// MAL ID → AniList ID via AniList GraphQL
+// MAL ID → AniList ID
 export async function malToAnilist(malId: number): Promise<number | null> {
   const cacheKey = `mal2al:${malId}`;
   const cached = cacheGet<number>(cacheKey);
   if (cached) return cached;
 
-  const query = `
-    query ($malId: Int) {
-      Media(idMal: $malId, type: ANIME) {
-        id
-        idMal
-        title { romaji english }
-      }
-    }
-  `;
-
+  const query = `query ($malId: Int) {
+    Media(idMal: $malId, type: ANIME) { id idMal title { romaji english } }
+  }`;
   const res = await anilistClient.post('', { query, variables: { malId } });
   const id = res.data?.data?.Media?.id ?? null;
   if (id) cacheSet(cacheKey, id);
   return id;
 }
 
-// AniList ID → anime metadata + site-specific IDs via Anify
+// Fetch title from AniList for a given anilistId
+async function getAnilistTitle(anilistId: number): Promise<{ title: string; malId: number | null }> {
+  const query = `query ($id: Int) {
+    Media(id: $id, type: ANIME) { idMal title { romaji english } }
+  }`;
+  const res = await anilistClient.post('', { query, variables: { id: anilistId } });
+  const media = res.data?.data?.Media;
+  return {
+    title: media?.title?.english ?? media?.title?.romaji ?? 'Unknown',
+    malId: media?.idMal ?? null,
+  };
+}
+
+// Search AnimePahe directly by title and return best-match session
+async function findPaheSession(title: string): Promise<string | null> {
+  try {
+    const results = await searchAnimePahe(title);
+    if (!results.length) return null;
+
+    // Score by title similarity — prefer exact/close matches
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const needle = normalize(title);
+
+    let best: { session: string; score: number } | null = null;
+    for (const r of results) {
+      const hay = normalize(r.title);
+      let score = 0;
+      if (hay === needle) score = 100;
+      else if (hay.startsWith(needle) || needle.startsWith(hay)) score = 80;
+      else if (hay.includes(needle) || needle.includes(hay)) score = 60;
+      else {
+        // Count matching words
+        const needleWords = needle.split('');
+        let matches = 0;
+        for (const ch of needleWords) if (hay.includes(ch)) matches++;
+        score = Math.floor((matches / Math.max(needle.length, 1)) * 40);
+      }
+      if (!best || score > best.score) best = { session: r.session, score };
+    }
+
+    // Only use if score is reasonable
+    return best && best.score >= 40 ? best.session : results[0].session;
+  } catch {
+    return null;
+  }
+}
+
+// AniList ID → metadata + site-specific IDs
 export async function getSiteIds(anilistId: number): Promise<SiteIds | null> {
   const cacheKey = `siteids:${anilistId}`;
   const cached = cacheGet<SiteIds>(cacheKey);
   if (cached) return cached;
 
-  const meta = await getAniListMeta(anilistId);
+  // Build result shell using AniList (always reliable for title + malId)
+  const alInfo = await getAnilistTitle(anilistId).catch(() => ({ title: 'Unknown', malId: null }));
 
-  // Try Anify first
+  const result: SiteIds = {
+    anilistId,
+    malId: alInfo.malId,
+    title: alInfo.title,
+    siteIds: {},
+  };
+
+  // Try Anify for site mappings
   try {
     const res = await axios.get(`https://api.anify.tv/info/${anilistId}`, {
-      params: { fields: 'id,title,mappings,coverImage,episodes' },
-      timeout: 10000,
+      params: { fields: 'mappings' },
+      timeout: 8000,
     });
-
-    const data = res.data;
-    const mappings: any[] = data?.mappings ?? [];
-
-    const result: SiteIds = {
-      anilistId,
-      malId: meta?.malId ?? null,
-      title: data?.title?.english ?? data?.title?.romaji ?? meta?.title ?? 'Unknown',
-      siteIds: {},
-    };
-
+    const mappings: any[] = res.data?.mappings ?? [];
     for (const m of mappings) {
       if (m.providerId === 'zoro')      result.siteIds.zoro = m.id;
-      if (m.providerId === 'zoro')      result.siteIds.wave = m.id;
       if (m.providerId === 'gogoanime') result.siteIds.gogoanime = m.id;
       if (m.providerId === 'animepahe') result.siteIds.animepahe = m.id;
-      if (m.providerId === 'mal')       result.malId = parseInt(m.id);
+      if (m.providerId === 'mal' && !result.malId) result.malId = parseInt(m.id);
     }
-
-    await enrichFromProviderSearch(result, meta?.titles ?? [result.title]);
-
-    cacheSet(cacheKey, result);
-    return result;
-  } catch (e) {
-    // Fallback: use AniList metadata plus live provider search.
-    try {
-      if (!meta) return null;
-
-      const result: SiteIds = {
-        anilistId,
-        malId: meta.malId,
-        title: meta.title,
-        siteIds: {},
-      };
-      await enrichFromProviderSearch(result, meta.titles);
-      cacheSet(cacheKey, result);
-      return result;
-    } catch {
-      return null;
-    }
+  } catch {
+    // Anify down or missing — fall through to direct scraper fallbacks below
   }
+
+  // If Anify didn't give us an AnimePahe session, search directly
+  if (!result.siteIds.animepahe && result.title !== 'Unknown') {
+    const session = await findPaheSession(result.title);
+    if (session) result.siteIds.animepahe = session;
+  }
+
+  // If still no zoro ID, try a slug guess (title-anilistId format common on HiAnime clones)
+  // This is a heuristic and may not always work
+  if (!result.siteIds.zoro && result.title !== 'Unknown') {
+    const slug = result.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    result.siteIds.zoro = `${slug}-${anilistId}`;
+  }
+
+  cacheSet(cacheKey, result);
+  return result;
 }
 
-// Search AniList by title → return anilistId + malId
+// Search AniList by title
 export async function searchAnilist(query: string): Promise<{
-  id: number; malId: number | null; title: string; coverImage: string; episodes: number | null;
+  id: number; malId: number | null; title: string; coverImage: string; episodes: number | null; status: string; format: string;
 }[]> {
   const cacheKey = `alsearch:${query.toLowerCase().trim()}`;
   const cached = cacheGet<any[]>(cacheKey);
   if (cached) return cached;
 
-  const gql = `
-    query ($search: String) {
-      Page(page: 1, perPage: 10) {
-        media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
-          id
-          idMal
-          episodes
-          title { romaji english }
-          coverImage { large medium }
-          status
-          format
-        }
+  const gql = `query ($search: String) {
+    Page(page: 1, perPage: 10) {
+      media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+        id idMal episodes
+        title { romaji english }
+        coverImage { large medium }
+        status format
       }
     }
-  `;
+  }`;
 
   const res = await anilistClient.post('', { query: gql, variables: { search: query } });
   const list = res.data?.data?.Page?.media ?? [];

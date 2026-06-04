@@ -1,5 +1,4 @@
 import { Router, Request, Response } from 'express';
-import axios from 'axios';
 import { malToAnilist, getSiteIds, searchAnilist } from './utils/mapper';
 import { cacheStats } from './utils/cache';
 import { resolveEmbed } from './resolvers/megacloud';
@@ -14,21 +13,6 @@ const router = Router();
 const SOURCES = ['senshi', 'dao', 'wave', 'animepahe'] as const;
 type Source = typeof SOURCES[number];
 
-function proxiedHlsUrl(req: Request, url: string): string {
-  const proto = String(req.headers['x-forwarded-proto'] || req.protocol).split(',')[0];
-  const origin = `${proto}://${req.get('host')}`;
-  return `${origin}/api/proxy/hls?url=${encodeURIComponent(url)}`;
-}
-
-function rewriteHlsPlaylist(req: Request, playlistUrl: string, body: string): string {
-  return body.split(/\r?\n/).map((line) => {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) return line;
-    const absolute = new URL(trimmed, playlistUrl).toString();
-    return proxiedHlsUrl(req, absolute);
-  }).join('\n');
-}
-
 async function resolveAlId(anilistId?: string, malId?: string): Promise<number | null> {
   if (anilistId) return parseInt(anilistId);
   if (malId) return malToAnilist(parseInt(malId));
@@ -36,22 +20,20 @@ async function resolveAlId(anilistId?: string, malId?: string): Promise<number |
 }
 
 async function fetchEpisodes(source: Source, siteIds: any): Promise<{ episodes: any[]; siteId: string; error?: string }> {
-  const senshiId = siteIds.siteIds?.senshi as string | undefined;
-  const daoId = (siteIds.siteIds?.anidao ?? siteIds.siteIds?.zoro) as string | undefined;
-  const waveId = (siteIds.siteIds?.wave ?? siteIds.siteIds?.zoro) as string | undefined;
+  const zoroId = siteIds.siteIds?.zoro as string | undefined;
   const paheId = siteIds.siteIds?.animepahe as string | undefined;
 
   if (source === 'senshi') {
-    if (!senshiId) return { episodes: [], siteId: '', error: 'Not indexed on Senshi' };
-    return { episodes: await getEpisodes(senshiId), siteId: senshiId };
+    if (!zoroId) return { episodes: [], siteId: '', error: 'Not indexed on Senshi' };
+    return { episodes: await getEpisodes(zoroId), siteId: zoroId };
   }
   if (source === 'dao') {
-    if (!daoId) return { episodes: [], siteId: '', error: 'Not indexed on AniDao' };
-    return { episodes: await getDaoEpisodes(daoId), siteId: daoId };
+    if (!zoroId) return { episodes: [], siteId: '', error: 'Not indexed on AniDao' };
+    return { episodes: await getDaoEpisodes(zoroId), siteId: zoroId };
   }
   if (source === 'wave') {
-    if (!waveId) return { episodes: [], siteId: '', error: 'Not indexed on AniWaves' };
-    return { episodes: await getWaveEpisodes(waveId), siteId: waveId };
+    if (!zoroId) return { episodes: [], siteId: '', error: 'Not indexed on AniWaves' };
+    return { episodes: await getWaveEpisodes(zoroId), siteId: zoroId };
   }
   if (source === 'animepahe') {
     if (!paheId) return { episodes: [], siteId: '', error: 'Not indexed on AnimePahe' };
@@ -69,42 +51,6 @@ router.get('/search', async (req: Request, res: Response) => {
     return res.json({ query: q, count: results.length, results });
   } catch (e) {
     return res.status(500).json({ error: 'Search failed', detail: String(e) });
-  }
-});
-
-router.get('/proxy/hls', async (req: Request, res: Response) => {
-  const target = String(req.query.url || '');
-  if (!target || !/^https?:\/\//i.test(target)) {
-    return res.status(400).json({ error: 'Missing or invalid ?url=' });
-  }
-
-  try {
-    const upstream = await axios.get<ArrayBuffer>(target, {
-      responseType: 'arraybuffer',
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': 'https://senshi.live/',
-        'Origin': 'https://senshi.live',
-        'Accept': '*/*',
-      },
-      timeout: 20000,
-    });
-
-    const contentType = String(upstream.headers['content-type'] || '');
-    const isPlaylist = /\.m3u8(\?|$)/i.test(target) || contentType.includes('mpegurl');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', isPlaylist ? 'no-store' : 'public, max-age=300');
-
-    if (isPlaylist) {
-      const body = Buffer.from(upstream.data).toString('utf8');
-      res.type('application/vnd.apple.mpegurl');
-      return res.send(rewriteHlsPlaylist(req, target, body));
-    }
-
-    if (contentType) res.type(contentType);
-    return res.send(Buffer.from(upstream.data));
-  } catch (e) {
-    return res.status(502).json({ error: 'HLS proxy failed', detail: String(e) });
   }
 });
 
@@ -193,9 +139,12 @@ async function watchHandler(req: Request, res: Response) {
     if (source === 'animepahe') {
       const paheId = siteIds.siteIds?.animepahe;
       if (!paheId) return res.status(404).json({ error: 'Not on AnimePahe' });
-      const episodes = await getPaheEpisodes(paheId);
-      const episode = episodes.find((e: any) => e.num === epNum);
-      if (!episode) return res.status(404).json({ error: `Episode ${epNum} not found` });
+      // Paginate: AnimePahe returns 30 eps per page
+      const page = Math.ceil(epNum / 30);
+      const episodes = await getPaheEpisodes(paheId, page);
+      // AnimePahe returns num as float (1.0) — match loosely
+      const episode = episodes.find((e: any) => Math.round(e.num) === epNum);
+      if (!episode) return res.status(404).json({ error: `Episode ${epNum} not found (page ${page})` });
       const embeds = await getPaheEmbeds(paheId, (episode as any).session);
       return res.json({ anilistId: alId, malId: siteIds.malId, title: siteIds.title, episode: epNum, type, source: 'animepahe', servers: embeds, note: 'AnimePahe uses Kwik embeds — iframe directly or resolve with kwik extractor' });
     }
@@ -237,15 +186,12 @@ async function watchHandler(req: Request, res: Response) {
     if (!embedResult) return res.status(502).json({ error: 'All servers failed' });
 
     const stream = await resolveEmbed(embedResult.embedUrl);
-    const m3u8 = stream?.m3u8
-      ? (source === 'senshi' ? proxiedHlsUrl(req, stream.m3u8) : stream.m3u8)
-      : null;
     return res.json({
       anilistId: alId, malId: siteIds.malId, title: siteIds.title,
       episode: epNum, type, source, server: usedServer,
       availableServers: filtered.map((s: any) => s.name),
       embedUrl: embedResult.embedUrl,
-      m3u8,
+      m3u8: stream?.m3u8 ?? null,
       subtitles: stream?.subtitles ?? [],
       intro: stream?.intro ?? null,
       outro: stream?.outro ?? null,
