@@ -2,7 +2,7 @@ import * as cheerio from 'cheerio';
 import { makeClient, makeAjaxClient } from '../utils/fetch';
 import { cacheGet, cacheSet } from '../utils/cache';
 
-const BASE = 'https://animepahe.ru';
+const BASE = 'https://animepahe.pw';
 const http = makeClient(BASE, BASE + '/');
 const ajax = makeAjaxClient(BASE, BASE + '/');
 

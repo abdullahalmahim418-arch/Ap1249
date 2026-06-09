@@ -39,7 +39,7 @@ exports.getPaheEmbeds = getPaheEmbeds;
 const cheerio = __importStar(require("cheerio"));
 const fetch_1 = require("../utils/fetch");
 const cache_1 = require("../utils/cache");
-const BASE = 'https://animepahe.ru';
+const BASE = 'https://animepahe.pw';
 const http = (0, fetch_1.makeClient)(BASE, BASE + '/');
 const ajax = (0, fetch_1.makeAjaxClient)(BASE, BASE + '/');
 // Search AnimePahe

@@ -43,15 +43,49 @@ const cache_1 = require("../utils/cache");
 const BASE = 'https://aniwaves.ru';
 const http = (0, fetch_1.makeClient)(BASE, BASE + '/');
 const ajax = (0, fetch_1.makeAjaxClient)(BASE, BASE + '/');
+function titleSlug(input) {
+    return input.replace(/-\d+$/, '').toLowerCase();
+}
+function serverType(raw) {
+    const value = raw.toLowerCase();
+    if (value.includes('dub'))
+        return 'dub';
+    if (value.includes('raw'))
+        return 'raw';
+    return 'sub';
+}
+async function resolveWaveWatchId(animeId) {
+    const direct = animeId.match(/-(\d{3,})$/)?.[1];
+    if (direct && direct !== animeId.split('-').pop())
+        return direct;
+    const query = titleSlug(animeId);
+    const res = await http.get('/filter', { params: { keyword: query } });
+    const $ = cheerio.load(res.data);
+    const wanted = query.replace(/-/g, ' ');
+    let fallback = '';
+    let exact = '';
+    $('a[href^="/watch/"]').each((_, el) => {
+        const href = $(el).attr('href') ?? '';
+        const id = href.match(/-(\d+)$/)?.[1] ?? '';
+        const title = $(el).find('.name, .d-title').first().text().trim().toLowerCase()
+            || $(el).attr('data-jp')?.toLowerCase()
+            || '';
+        if (id && !fallback)
+            fallback = id;
+        if (id && (title === wanted || href.includes(`/watch/${query}-`)))
+            exact = id;
+    });
+    return exact || fallback || null;
+}
 async function searchAniWaves(query) {
-    const res = await http.get('/search', { params: { keyword: query } });
+    const res = await http.get('/filter', { params: { keyword: query } });
     const $ = cheerio.load(res.data);
     const results = [];
-    $('.film-name a, .flw-item .film-name a, [class*="film"] a[href*="/anime/"]').each((_, el) => {
+    $('a[href^="/watch/"]').each((_, el) => {
         const href = $(el).attr('href') ?? '';
-        const title = $(el).text().trim();
         const id = href.split('/').filter(Boolean).pop()?.split('?')[0] ?? '';
-        if (title && id)
+        const title = $(el).find('.name, .d-title').first().text().trim() || $(el).text().trim();
+        if (title && id && !results.some((r) => r.id === id))
             results.push({ title, id, url: BASE + href });
     });
     return results;
@@ -61,15 +95,19 @@ async function getWaveEpisodes(animeId) {
     const cached = (0, cache_1.cacheGet)(cacheKey);
     if (cached)
         return cached;
-    const numericId = animeId.split('-').pop() ?? animeId;
-    const res = await ajax.get(`/ajax/v2/episode/list/${numericId}`);
-    const html = res.data?.html ?? (typeof res.data === 'string' ? res.data : '');
+    const watchId = await resolveWaveWatchId(animeId);
+    if (!watchId)
+        return [];
+    const res = await ajax.get(`/ajax/episode/list/${watchId}`, {
+        headers: { Referer: `${BASE}/watch/${animeId}` },
+    });
+    const html = res.data?.result ?? res.data?.html ?? (typeof res.data === 'string' ? res.data : '');
     const $ = cheerio.load(html);
     const episodes = [];
-    $('a[data-id], a[href*="/watch/"]').each((_, el) => {
-        const id = $(el).attr('data-id') ?? '';
-        const num = parseInt($(el).attr('data-number') ?? '0');
-        const title = $(el).attr('title') ?? `Episode ${num}`;
+    $('a[data-ids][data-num]').each((_, el) => {
+        const id = $(el).attr('data-ids') ?? '';
+        const num = Number($(el).attr('data-num') ?? 0);
+        const title = $(el).attr('title') ?? ($(el).text().replace(/\s+/g, ' ').trim() || `Episode ${num}`);
         if (id && num > 0)
             episodes.push({ num, id, title });
     });
@@ -78,32 +116,31 @@ async function getWaveEpisodes(animeId) {
     return episodes;
 }
 async function getWaveServers(episodeId) {
-    const res = await ajax.get('/ajax/v2/episode/servers', { params: { episodeId } });
-    const html = res.data?.html ?? '';
+    const res = await ajax.get(`/ajax/server/list?servers=${episodeId}`);
+    const html = res.data?.result ?? res.data?.html ?? '';
     const $ = cheerio.load(html);
     const servers = [];
-    $('[data-type="sub"] li[data-id], .servers-sub li[data-id]').each((_, el) => {
-        const sourceId = $(el).attr('data-id') ?? '';
-        const name = $(el).text().trim() || 'Server';
+    $('[data-link-id]').each((_, el) => {
+        const sourceId = $(el).attr('data-link-id') ?? '';
+        const group = $(el).closest('[data-type]').attr('data-type') ?? '';
+        const name = $(el).text().replace(/\s+/g, ' ').trim() || `Server ${$(el).attr('data-sv-id') ?? ''}`.trim();
         if (sourceId)
-            servers.push({ name, sourceId, type: 'sub' });
-    });
-    $('[data-type="dub"] li[data-id], .servers-dub li[data-id]').each((_, el) => {
-        const sourceId = $(el).attr('data-id') ?? '';
-        const name = $(el).text().trim() || 'Server';
-        if (sourceId)
-            servers.push({ name, sourceId, type: 'dub' });
+            servers.push({ name, sourceId, type: serverType(group || name) });
     });
     return servers;
 }
 async function getWaveEmbedUrl(sourceId) {
+    if (/^https?:\/\//i.test(sourceId))
+        return { embedUrl: sourceId, serverName: new URL(sourceId).hostname };
     try {
-        const res = await ajax.get('/ajax/v2/episode/sources', { params: { id: sourceId } });
-        const data = res.data;
+        const res = await ajax.get('/ajax/sources', {
+            params: { id: sourceId, asi: 0, autoPlay: 0 },
+        });
+        const data = res.data?.result ?? res.data;
+        if (data?.url)
+            return { embedUrl: data.url, serverName: String(data.server ?? 'server') };
         if (data?.link)
             return { embedUrl: data.link, serverName: data.server ?? 'server' };
-        if (data?.url)
-            return { embedUrl: data.url, serverName: 'server' };
         return null;
     }
     catch {

@@ -43,44 +43,68 @@ const cache_1 = require("../utils/cache");
 const BASE = 'https://anidao.to';
 const http = (0, fetch_1.makeClient)(BASE, BASE + '/');
 const ajax = (0, fetch_1.makeAjaxClient)(BASE, BASE + '/');
-// Search AniDao
+function normalizeAnimeId(animeId) {
+    return animeId.replace(/-\d+$/, '');
+}
+function serverType(raw) {
+    const value = raw.toLowerCase();
+    if (value.includes('dub'))
+        return 'dub';
+    if (value.includes('raw'))
+        return 'raw';
+    return 'sub';
+}
 async function searchAniDao(query) {
-    const res = await http.get('/search', { params: { keyword: query } });
+    const res = await http.get('/search.html', { params: { keyword: query } });
     const $ = cheerio.load(res.data);
     const results = [];
-    $('.film-name a, .flw-item .film-name a').each((_, el) => {
+    $('a[href^="/anime/"]').each((_, el) => {
         const href = $(el).attr('href') ?? '';
-        const title = $(el).text().trim();
+        const title = $(el).find('[data-an-name-en], .name, h3').first().text().trim() || $(el).text().trim();
         const id = href.split('/').filter(Boolean).pop()?.split('?')[0] ?? '';
-        if (title && id)
+        if (title && id && !results.some((r) => r.id === id))
             results.push({ title, id, url: BASE + href });
     });
     return results;
 }
-// Get episode list
 async function getDaoEpisodes(animeId) {
-    const cacheKey = `dao:eps:${animeId}`;
+    const slug = normalizeAnimeId(animeId);
+    const cacheKey = `dao:eps:${slug}`;
     const cached = (0, cache_1.cacheGet)(cacheKey);
     if (cached)
         return cached;
-    const numericId = animeId.split('-').pop() ?? animeId;
-    const res = await ajax.get(`/ajax/v2/episode/list/${numericId}`);
-    const html = res.data?.html ?? (typeof res.data === 'string' ? res.data : '');
-    const $ = cheerio.load(html);
+    const res = await http.get(`/anime/${slug}`);
+    const $ = cheerio.load(res.data);
     const episodes = [];
-    $('a[data-id], a[href*="/watch/"]').each((_, el) => {
-        const id = $(el).attr('data-id') ?? '';
-        const num = parseInt($(el).attr('data-number') ?? '0');
-        const title = $(el).attr('title') ?? `Episode ${num}`;
-        if (id && num > 0)
-            episodes.push({ num, id, title });
+    $('a[href^="/watch-online/"]').each((_, el) => {
+        const href = $(el).attr('href') ?? '';
+        const match = href.match(/episode-(\d+(?:\.\d+)?)/i);
+        const num = match ? Number(match[1]) : 0;
+        const title = $(el).find('.title, .name').first().text().trim() || `Episode ${num}`;
+        if (num > 0 && !episodes.some((ep) => ep.num === num)) {
+            episodes.push({ num, id: href, title });
+        }
     });
+    episodes.sort((a, b) => a.num - b.num);
     if (episodes.length > 0)
         (0, cache_1.cacheSet)(cacheKey, episodes, 'episodes');
     return episodes;
 }
-// Get servers for an episode
 async function getDaoServers(episodeId) {
+    if (episodeId.startsWith('/watch-online/')) {
+        const res = await http.get(episodeId);
+        const $ = cheerio.load(res.data);
+        const servers = [];
+        $('[data-an-video]').each((_, el) => {
+            const sourceId = $(el).attr('data-an-video') ?? '';
+            const group = $(el).closest('[data-an-panel]').attr('data-an-panel') ?? '';
+            const label = $(el).text().replace(/\s+/g, ' ').trim();
+            const name = label || $(el).attr('data-an-server-btn') || 'Server';
+            if (sourceId)
+                servers.push({ name, sourceId, type: serverType(group || name) });
+        });
+        return servers;
+    }
     const res = await ajax.get('/ajax/v2/episode/servers', { params: { episodeId } });
     const html = res.data?.html ?? '';
     const $ = cheerio.load(html);
@@ -99,8 +123,9 @@ async function getDaoServers(episodeId) {
     });
     return servers;
 }
-// Get embed URL
 async function getDaoEmbedUrl(sourceId) {
+    if (/^https?:\/\//i.test(sourceId))
+        return { embedUrl: sourceId, serverName: new URL(sourceId).hostname };
     try {
         const res = await ajax.get('/ajax/v2/episode/sources', { params: { id: sourceId } });
         const data = res.data;

@@ -1,6 +1,10 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
+const axios_1 = __importDefault(require("axios"));
 const mapper_1 = require("./utils/mapper");
 const cache_1 = require("./utils/cache");
 const megacloud_1 = require("./resolvers/megacloud");
@@ -10,6 +14,33 @@ const aniwaves_1 = require("./scrapers/aniwaves");
 const animepahe_1 = require("./scrapers/animepahe");
 const router = (0, express_1.Router)();
 const SOURCES = ['senshi', 'dao', 'wave', 'animepahe'];
+function publicBase(req) {
+    const proto = req.headers['x-forwarded-proto']?.split(',')[0] || req.protocol;
+    return `${proto}://${req.get('host')}`;
+}
+function proxiedHlsUrl(req, url) {
+    return `${publicBase(req)}/api/proxy/hls?url=${encodeURIComponent(url)}`;
+}
+function rewriteHlsPlaylist(req, body, sourceUrl) {
+    const base = new URL(sourceUrl);
+    return body
+        .split(/\r?\n/)
+        .map((line) => {
+        const trimmed = line.trim();
+        if (!trimmed)
+            return line;
+        if (trimmed.startsWith('#EXT-X-KEY') && trimmed.includes('URI=')) {
+            return line.replace(/URI="([^"]+)"/, (_m, uri) => {
+                const absolute = new URL(uri, base).toString();
+                return `URI="${proxiedHlsUrl(req, absolute)}"`;
+            });
+        }
+        if (trimmed.startsWith('#'))
+            return line;
+        return proxiedHlsUrl(req, new URL(trimmed, base).toString());
+    })
+        .join('\n');
+}
 async function resolveAlId(anilistId, malId) {
     if (anilistId)
         return parseInt(anilistId);
@@ -216,16 +247,21 @@ async function watchHandler(req, res) {
             return res.status(502).json({ error: 'All servers failed' });
         const directM3u8 = typeof embedResult.embedUrl === 'string' && embedResult.embedUrl.includes('.m3u8');
         const stream = directM3u8 ? null : await (0, megacloud_1.resolveEmbed)(embedResult.embedUrl);
+        const m3u8 = directM3u8 ? embedResult.embedUrl : stream?.m3u8 ?? null;
+        const playbackMode = m3u8 ? 'hls' : 'iframe';
         return res.json({
             anilistId: alId, malId: siteIds.malId, title: siteIds.title,
             episode: epNum, type, source, server: usedServer,
             availableServers: filtered.map((s) => s.name),
             embedUrl: embedResult.embedUrl,
-            m3u8: directM3u8 ? embedResult.embedUrl : stream?.m3u8 ?? null,
+            m3u8,
+            hlsProxyUrl: directM3u8 ? proxiedHlsUrl(req, embedResult.embedUrl) : null,
+            playbackMode,
+            iframeOnly: playbackMode === 'iframe',
             subtitles: stream?.subtitles ?? [],
             intro: stream?.intro ?? null,
             outro: stream?.outro ?? null,
-            note: directM3u8 || stream ? null : 'Use embedUrl in iframe - m3u8 decrypt failed (key may have rotated)',
+            note: playbackMode === 'hls' ? null : 'This source exposes an iframe embed only; no direct HLS URL is available from the public source response.',
         });
     }
     catch (e) {
@@ -234,6 +270,38 @@ async function watchHandler(req, res) {
     }
 }
 router.get('/watch/:source/:id/:ep/:type', watchHandler);
+router.get('/proxy/hls', async (req, res) => {
+    const url = req.query.url;
+    if (!url)
+        return res.status(400).json({ error: 'Missing ?url=' });
+    if (!/^https?:\/\//i.test(url))
+        return res.status(400).json({ error: '?url must be absolute http(s)' });
+    try {
+        const upstream = await axios_1.default.get(url, {
+            responseType: 'arraybuffer',
+            timeout: 15000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0',
+                'Accept': '*/*',
+                'Referer': 'https://senshi.live/',
+                'Origin': 'https://senshi.live',
+            },
+        });
+        const contentType = String(upstream.headers['content-type'] ?? '');
+        const body = Buffer.from(upstream.data);
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Cache-Control', 'public, max-age=30');
+        if (url.includes('.m3u8') || contentType.includes('mpegurl')) {
+            res.type('application/vnd.apple.mpegurl');
+            return res.send(rewriteHlsPlaylist(req, body.toString('utf8'), url));
+        }
+        res.type(contentType || 'application/octet-stream');
+        return res.send(body);
+    }
+    catch (e) {
+        return res.status(e?.response?.status || 502).json({ error: 'HLS proxy failed', detail: e?.message || String(e) });
+    }
+});
 // ── GET /api/watch (query-param compat)
 router.get('/watch', async (req, res) => {
     const { anilistId, malId, ep, type = 'sub', source = 'senshi', server } = req.query;

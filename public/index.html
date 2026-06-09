@@ -941,7 +941,7 @@ function escapeAttr(value) {
 
 function renderEmbedPreview(data) {
   const ep = document.getElementById('embedPreview');
-  const hlsUrl = data.m3u8 || (data.embedUrl && data.embedUrl.includes('.m3u8') ? data.embedUrl : '');
+  const hlsUrl = data.hlsProxyUrl || data.m3u8 || (data.embedUrl && data.embedUrl.includes('.m3u8') ? data.embedUrl : '');
 
   if (hlsUrl) {
     ep.innerHTML = `<video id="hlsPreview" controls playsinline></video>`;
@@ -1006,6 +1006,7 @@ async function doFetch() {
           <div class="stream-card-label">m3u8 (HLS)</div>
           <div class="stream-card-val">${data.m3u8 ? `<a href="${data.m3u8}" target="_blank">${data.m3u8}</a>` : '<span class="null-val">null — use embedUrl in iframe</span>'}</div>
         </div>
+        ${data.hlsProxyUrl ? `<div class="stream-card" style="grid-column:1/-1"><div class="stream-card-label">Playable HLS Proxy</div><div class="stream-card-val"><a href="${data.hlsProxyUrl}" target="_blank">${data.hlsProxyUrl}</a></div></div>` : ''}
         <div class="stream-card">
           <div class="stream-card-label">Server Used</div>
           <div class="stream-card-val">${data.server || '<span class="null-val">—</span>'}</div>
