@@ -24,8 +24,9 @@ async function fetchEpisodes(source: Source, siteIds: any): Promise<{ episodes: 
   const paheId = siteIds.siteIds?.animepahe as string | undefined;
 
   if (source === 'senshi') {
-    if (!zoroId) return { episodes: [], siteId: '', error: 'Not indexed on Senshi' };
-    return { episodes: await getEpisodes(zoroId), siteId: zoroId };
+    if (!siteIds.malId) return { episodes: [], siteId: '', error: 'Missing MAL ID for Senshi' };
+    const senshiId = String(siteIds.malId);
+    return { episodes: await getEpisodes(senshiId), siteId: senshiId };
   }
   if (source === 'dao') {
     if (!zoroId) return { episodes: [], siteId: '', error: 'Not indexed on AniDao' };
@@ -185,17 +186,18 @@ async function watchHandler(req: Request, res: Response) {
     }
     if (!embedResult) return res.status(502).json({ error: 'All servers failed' });
 
-    const stream = await resolveEmbed(embedResult.embedUrl);
+    const directM3u8 = typeof embedResult.embedUrl === 'string' && embedResult.embedUrl.includes('.m3u8');
+    const stream = directM3u8 ? null : await resolveEmbed(embedResult.embedUrl);
     return res.json({
       anilistId: alId, malId: siteIds.malId, title: siteIds.title,
       episode: epNum, type, source, server: usedServer,
       availableServers: filtered.map((s: any) => s.name),
       embedUrl: embedResult.embedUrl,
-      m3u8: stream?.m3u8 ?? null,
+      m3u8: directM3u8 ? embedResult.embedUrl : stream?.m3u8 ?? null,
       subtitles: stream?.subtitles ?? [],
       intro: stream?.intro ?? null,
       outro: stream?.outro ?? null,
-      note: stream ? null : 'Use embedUrl in iframe — m3u8 decrypt failed (key may have rotated)',
+      note: directM3u8 || stream ? null : 'Use embedUrl in iframe - m3u8 decrypt failed (key may have rotated)',
     });
   } catch (e) {
     console.error(`[/watch/${source}]`, e);

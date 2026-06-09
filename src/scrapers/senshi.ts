@@ -25,17 +25,15 @@ export interface EmbedResult {
   type: string;
 }
 
-// Search senshi for an anime by title — returns slug/id
+// Legacy search kept for compatibility with callers that import it directly.
 export async function searchSenshi(query: string): Promise<{ title: string; id: string; url: string }[]> {
   const res = await http.get('/search', { params: { keyword: query } });
   const $ = cheerio.load(res.data);
   const results: { title: string; id: string; url: string }[] = [];
 
-  // HiAnime-style selectors — adjust if Senshi differs
   $('.flw-item .film-name a, [class*="film-detail"] h3 a').each((_, el) => {
     const href = $(el).attr('href') ?? '';
     const title = $(el).text().trim();
-    // ID is the last path segment without query string, e.g. /watch/naruto-123 → naruto-123
     const id = href.split('/').filter(Boolean).pop()?.split('?')[0] ?? '';
     if (title && id) results.push({ title, id, url: BASE + href });
   });
@@ -43,35 +41,50 @@ export async function searchSenshi(query: string): Promise<{ title: string; id: 
   return results;
 }
 
-// Get episode list for a zoro-style anime ID
 export async function getEpisodes(animeId: string): Promise<SenshiEpisode[]> {
   const cacheKey = `senshi:eps:${animeId}`;
   const cached = cacheGet<SenshiEpisode[]>(cacheKey);
   if (cached) return cached;
 
-  // Zoro/HiAnime-style: extract numeric part of ID for AJAX call
-  // e.g. "naruto-225" → 225 for /ajax/v2/episode/list/225
-  const numericId = (animeId.split('-').pop() || animeId) as string;
-
-  const res = await ajax.get(`/ajax/v2/episode/list/${numericId}`);
-  const html = (res.data?.html || (typeof res.data === 'string' ? res.data : ''));
-  const $ = cheerio.load(html);
-
-  const episodes: SenshiEpisode[] = [];
-
-  $('a[data-id], a[href*="/watch/"]').each((_, el) => {
-    const id = $(el).attr('data-id') ?? '';
-    const num = parseInt($(el).attr('data-number') ?? $(el).attr('data-ep-num') ?? '0');
-    const title = ($(el).attr('title') ?? $(el).text().trim()) || `Episode ${num}`;
-    if (id && num > 0) episodes.push({ num, id, title });
+  const res = await http.get(`/episodes/${animeId}`, {
+    headers: { Accept: 'application/json' },
   });
+
+  const rows = Array.isArray(res.data) ? res.data : [];
+  const episodes: SenshiEpisode[] = rows
+    .map((ep: any) => {
+      const num = Number(ep.ep_id ?? ep.episode_number ?? ep.num);
+      return {
+        num,
+        id: `${animeId}:${num}`,
+        title: ep.ep_title ?? `Episode ${num}`,
+      };
+    })
+    .filter((ep: SenshiEpisode) => ep.num > 0);
 
   if (episodes.length > 0) cacheSet(cacheKey, episodes, 'episodes');
   return episodes;
 }
 
-// Get available servers for a specific episode
 export async function getServers(episodeId: string): Promise<SenshiServer[]> {
+  if (episodeId.includes(':')) {
+    const [animeId, epNum] = episodeId.split(':');
+    const res = await http.get(`/episode-embeds/${animeId}/${epNum}`, {
+      headers: { Accept: 'application/json' },
+    });
+    const embeds = Array.isArray(res.data) ? res.data : [];
+
+    return embeds
+      .map((embed: any, index: number) => {
+        const status = String(embed.status ?? '').toLowerCase();
+        const type = status.includes('dub') ? 'dub' : status.includes('raw') ? 'raw' : 'sub';
+        const name = embed.status || `Server ${index + 1}`;
+        const sourceId = embed.url || embed.server2 || embed.serverFM || '';
+        return sourceId ? { name, serverId: String(index + 1), sourceId, type } : null;
+      })
+      .filter(Boolean) as SenshiServer[];
+  }
+
   const res = await ajax.get('/ajax/v2/episode/servers', {
     params: { episodeId },
   });
@@ -80,7 +93,6 @@ export async function getServers(episodeId: string): Promise<SenshiServer[]> {
   const $ = cheerio.load(html);
   const servers: SenshiServer[] = [];
 
-  // Sub servers
   $('[data-type="sub"] .server-item, .servers-sub .item, [class*="sub"] li[data-id]').each((_, el) => {
     const sourceId = $(el).attr('data-id') ?? '';
     const serverId = $(el).attr('data-server-id') ?? '';
@@ -88,7 +100,6 @@ export async function getServers(episodeId: string): Promise<SenshiServer[]> {
     if (sourceId) servers.push({ name, serverId, sourceId, type: 'sub' });
   });
 
-  // Dub servers
   $('[data-type="dub"] .server-item, .servers-dub .item, [class*="dub"] li[data-id]').each((_, el) => {
     const sourceId = $(el).attr('data-id') ?? '';
     const serverId = $(el).attr('data-server-id') ?? '';
@@ -96,7 +107,6 @@ export async function getServers(episodeId: string): Promise<SenshiServer[]> {
     if (sourceId) servers.push({ name, serverId, sourceId, type: 'dub' });
   });
 
-  // Raw servers
   $('[data-type="raw"] .server-item, .servers-raw .item, [class*="raw"] li[data-id]').each((_, el) => {
     const sourceId = $(el).attr('data-id') ?? '';
     const serverId = $(el).attr('data-server-id') ?? '';
@@ -107,8 +117,15 @@ export async function getServers(episodeId: string): Promise<SenshiServer[]> {
   return servers;
 }
 
-// Resolve a sourceId to an embed URL
 export async function getEmbedUrl(sourceId: string): Promise<EmbedResult | null> {
+  if (/^https?:\/\//i.test(sourceId)) {
+    return {
+      embedUrl: sourceId,
+      serverName: 'Senshi',
+      type: sourceId.includes('.m3u8') ? 'hls' : 'iframe',
+    };
+  }
+
   try {
     const res = await ajax.get('/ajax/v2/episode/sources', {
       params: { id: sourceId },
@@ -124,7 +141,6 @@ export async function getEmbedUrl(sourceId: string): Promise<EmbedResult | null>
       };
     }
 
-    // Some sites wrap it differently
     if (data?.url) {
       return { embedUrl: data.url, serverName: 'server', type: 'iframe' };
     }

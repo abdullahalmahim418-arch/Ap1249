@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>AniVault API — Docs & Tester</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@~1/dist/hls.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -156,7 +157,7 @@ pre { padding:20px; overflow-x:auto; font-family:var(--mono); font-size:12px; li
 .result-json pre { max-height:460px; overflow-y:auto; }
 
 .embed-preview { background:#060810; border:1px solid var(--border); border-radius:10px; overflow:hidden; aspect-ratio:16/9; }
-.embed-preview iframe { width:100%; height:100%; border:none; }
+.embed-preview iframe, .embed-preview video { width:100%; height:100%; border:none; display:block; background:#000; }
 .embed-placeholder { width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; color:var(--muted); gap:12px; font-family:var(--mono); font-size:12px; min-height:200px; }
 .embed-placeholder-icon { font-size:40px; opacity:0.2; }
 
@@ -934,6 +935,36 @@ function getBase() {
   return document.getElementById('baseUrl').value.trim().replace(/\/$/, '') || window.location.origin;
 }
 
+function escapeAttr(value) {
+  return String(value).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
+}
+
+function renderEmbedPreview(data) {
+  const ep = document.getElementById('embedPreview');
+  const hlsUrl = data.m3u8 || (data.embedUrl && data.embedUrl.includes('.m3u8') ? data.embedUrl : '');
+
+  if (hlsUrl) {
+    ep.innerHTML = `<video id="hlsPreview" controls playsinline></video>`;
+    const video = document.getElementById('hlsPreview');
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = hlsUrl;
+    } else if (window.Hls && Hls.isSupported()) {
+      const hls = new Hls();
+      hls.loadSource(hlsUrl);
+      hls.attachMedia(video);
+    } else {
+      ep.innerHTML = '<div class="embed-placeholder"><div class="embed-placeholder-icon">!</div><span>HLS playback is not supported in this browser</span></div>';
+    }
+    return;
+  }
+
+  if (data.embedUrl) {
+    ep.innerHTML = `<iframe src="${escapeAttr(data.embedUrl)}" allowfullscreen allow="autoplay; fullscreen; picture-in-picture"></iframe>`;
+  } else {
+    ep.innerHTML = '<div class="embed-placeholder"><div class="embed-placeholder-icon">!</div><span>No embed URL returned</span></div>';
+  }
+}
+
 async function doFetch() {
   const url = buildUrl();
   if (!url) { alert('Search and select an anime first.'); return; }
@@ -962,14 +993,7 @@ async function doFetch() {
     sCode.className = res.ok ? 'status-code ok' : 'status-code err';
 
     document.getElementById('jsonOutput').innerHTML = highlight(JSON.stringify(data, null, 2));
-
-    // embed preview
-    const ep = document.getElementById('embedPreview');
-    if (data.embedUrl) {
-      ep.innerHTML = `<iframe src="${data.embedUrl}" allowfullscreen allow="autoplay; fullscreen; picture-in-picture"></iframe>`;
-    } else {
-      ep.innerHTML = '<div class="embed-placeholder"><div class="embed-placeholder-icon">⚠</div><span>No embed URL returned</span></div>';
-    }
+    renderEmbedPreview(data);
 
     // stream cards
     if (selEndpoint === 'watch') {
