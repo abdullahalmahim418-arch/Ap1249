@@ -12,19 +12,21 @@ const senshi_1 = require("./scrapers/senshi");
 const anidao_1 = require("./scrapers/anidao");
 const aniwaves_1 = require("./scrapers/aniwaves");
 const animeheaven_1 = require("./scrapers/animeheaven");
+const miruro_1 = require("./scrapers/miruro");
 const router = (0, express_1.Router)();
-const SOURCES = ['senshi', 'dao', 'wave', 'animeheaven'];
+const SOURCES = ['senshi', 'dao', 'wave', 'animeheaven', 'miruro'];
 function publicBase(req) {
     const proto = req.headers['x-forwarded-proto']?.split(',')[0] || req.protocol;
     return `${proto}://${req.get('host')}`;
 }
-function proxiedHlsUrl(req, url) {
-    return `${publicBase(req)}/api/proxy/hls?url=${encodeURIComponent(url)}`;
+function proxiedHlsUrl(req, url, ref) {
+    const refParam = ref ? `&ref=${encodeURIComponent(ref)}` : '';
+    return `${publicBase(req)}/api/proxy/hls?url=${encodeURIComponent(url)}${refParam}`;
 }
 function proxiedVideoUrl(req, url) {
     return `${publicBase(req)}/api/proxy/video?url=${encodeURIComponent(url)}`;
 }
-function rewriteHlsPlaylist(req, body, sourceUrl) {
+function rewriteHlsPlaylist(req, body, sourceUrl, ref) {
     const base = new URL(sourceUrl);
     return body
         .split(/\r?\n/)
@@ -35,12 +37,12 @@ function rewriteHlsPlaylist(req, body, sourceUrl) {
         if (trimmed.startsWith('#EXT-X-KEY') && trimmed.includes('URI=')) {
             return line.replace(/URI="([^"]+)"/, (_m, uri) => {
                 const absolute = new URL(uri, base).toString();
-                return `URI="${proxiedHlsUrl(req, absolute)}"`;
+                return `URI="${proxiedHlsUrl(req, absolute, ref)}"`;
             });
         }
         if (trimmed.startsWith('#'))
             return line;
-        return proxiedHlsUrl(req, new URL(trimmed, base).toString());
+        return proxiedHlsUrl(req, new URL(trimmed, base).toString(), ref);
     })
         .join('\n');
 }
@@ -74,6 +76,12 @@ async function fetchEpisodes(source, siteIds, overrides = {}) {
         if (!heavenId)
             return { episodes: [], siteId: '', error: 'Not indexed on AnimeHeaven' };
         return { episodes: await (0, animeheaven_1.getHeavenEpisodes)(heavenId), siteId: heavenId };
+    }
+    if (source === 'miruro') {
+        if (!siteIds.anilistId)
+            return { episodes: [], siteId: '', error: 'Missing AniList ID for Miruro' };
+        const alId = siteIds.anilistId;
+        return { episodes: await (0, miruro_1.getMiruroEpisodes)(alId), siteId: String(alId) };
     }
     return { episodes: [], siteId: '', error: 'Unknown source' };
 }
@@ -169,6 +177,8 @@ router.get('/servers', async (req, res) => {
             allServers = await (0, aniwaves_1.getWaveServers)(episode.id);
         if (source === 'animeheaven')
             allServers = await (0, animeheaven_1.getHeavenServers)(episode.id);
+        if (source === 'miruro')
+            allServers = await (0, miruro_1.getMiruroServers)(episode.id);
         const filtered = type === 'all' ? allServers : allServers.filter((s) => s.type === type);
         return res.json({
             anilistId: siteIds.anilistId,
@@ -225,6 +235,8 @@ async function watchHandler(req, res) {
             allServers = await (0, aniwaves_1.getWaveServers)(episode.id);
         if (source === 'animeheaven')
             allServers = await (0, animeheaven_1.getHeavenServers)(episode.id);
+        if (source === 'miruro')
+            allServers = await (0, miruro_1.getMiruroServers)(episode.id);
         let filtered = allServers.filter((s) => s.type === type);
         if (!filtered.length)
             filtered = allServers.filter((s) => s.type === 'sub');
@@ -249,6 +261,8 @@ async function watchHandler(req, res) {
                 raw = await (0, aniwaves_1.getWaveEmbedUrl)(server.sourceId);
             if (source === 'animeheaven')
                 raw = await (0, animeheaven_1.getHeavenStream)(server.sourceId);
+            if (source === 'miruro')
+                raw = await (0, miruro_1.getMiruroEmbedUrl)(server.sourceId);
             if (raw) {
                 embedResult = raw;
                 usedServer = server.name;
@@ -295,7 +309,7 @@ async function watchHandler(req, res) {
             availableServers: filtered.map((s) => s.name),
             embedUrl: embedResult.embedUrl,
             m3u8: directM3u8 ? embedResult.embedUrl : stream?.m3u8 ?? null,
-            hlsProxyUrl: directM3u8 ? proxiedHlsUrl(req, embedResult.embedUrl) : null,
+            hlsProxyUrl: directM3u8 ? proxiedHlsUrl(req, embedResult.embedUrl, embedResult.referer) : null,
             playbackMode: hasHls ? 'hls' : 'iframe',
             iframeOnly: !hasHls,
             subtitles: stream?.subtitles ?? [],
@@ -312,10 +326,22 @@ async function watchHandler(req, res) {
 router.get('/watch/:source/:id/:ep/:type', watchHandler);
 router.get('/proxy/hls', async (req, res) => {
     const url = req.query.url;
+    const ref = req.query.ref;
     if (!url)
         return res.status(400).json({ error: 'Missing ?url=' });
     if (!/^https?:\/\//i.test(url))
         return res.status(400).json({ error: '?url must be absolute http(s)' });
+    let referer = 'https://senshi.live/';
+    let origin = 'https://senshi.live';
+    if (ref && /^https?:\/\//i.test(ref)) {
+        referer = ref;
+        try {
+            origin = new URL(ref).origin;
+        }
+        catch {
+            // keep default origin if ref is malformed
+        }
+    }
     try {
         const upstream = await axios_1.default.get(url, {
             responseType: 'arraybuffer',
@@ -323,8 +349,8 @@ router.get('/proxy/hls', async (req, res) => {
             headers: {
                 'User-Agent': 'Mozilla/5.0',
                 'Accept': '*/*',
-                'Referer': 'https://senshi.live/',
-                'Origin': 'https://senshi.live',
+                'Referer': referer,
+                'Origin': origin,
             },
         });
         const contentType = String(upstream.headers['content-type'] ?? '');
@@ -332,8 +358,12 @@ router.get('/proxy/hls', async (req, res) => {
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Cache-Control', 'public, max-age=30');
         if (url.includes('.m3u8') || contentType.includes('mpegurl')) {
+            const text = body.toString('utf8');
+            if (!text.trim().startsWith('#EXTM3U')) {
+                return res.status(502).json({ error: 'Upstream did not return a valid m3u8 playlist', body: text.slice(0, 300) });
+            }
             res.type('application/vnd.apple.mpegurl');
-            return res.send(rewriteHlsPlaylist(req, body.toString('utf8'), url));
+            return res.send(rewriteHlsPlaylist(req, text, url, ref));
         }
         res.type(contentType || 'application/octet-stream');
         return res.send(body);
