@@ -18,9 +18,10 @@ export function makeClient(baseURL: string, referer: string, extra?: Record<stri
   });
 }
 
-export function makeAjaxClient(baseURL: string, referer: string): AxiosInstance {
+export function makeAjaxClient(baseURL: string, referer: string, extra?: Record<string, string>): AxiosInstance {
   return makeClient(baseURL, referer, {
     'Accept': 'application/json, text/javascript, */*; q=0.01',
+    ...extra,
   });
 }
 

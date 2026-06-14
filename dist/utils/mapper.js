@@ -9,7 +9,15 @@ exports.searchAnilist = searchAnilist;
 const axios_1 = __importDefault(require("axios"));
 const fetch_1 = require("./fetch");
 const cache_1 = require("./cache");
-const animepahe_1 = require("../scrapers/animepahe");
+const animeheaven_1 = require("../scrapers/animeheaven");
+async function enrichAnimeHeaven(result) {
+    if (!result.siteIds.animeheaven && result.title !== 'Unknown') {
+        const id = await (0, animeheaven_1.findAnimeHeavenId)(result.title).catch(() => null);
+        if (id)
+            result.siteIds.animeheaven = id;
+    }
+    return result;
+}
 // MAL ID → AniList ID
 async function malToAnilist(malId) {
     const cacheKey = `mal2al:${malId}`;
@@ -37,50 +45,17 @@ async function getAnilistTitle(anilistId) {
         malId: media?.idMal ?? null,
     };
 }
-// Search AnimePahe directly by title and return best-match session
-async function findPaheSession(title) {
-    try {
-        const results = await (0, animepahe_1.searchAnimePahe)(title);
-        if (!results.length)
-            return null;
-        // Score by title similarity — prefer exact/close matches
-        const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-        const needle = normalize(title);
-        let best = null;
-        for (const r of results) {
-            const hay = normalize(r.title);
-            let score = 0;
-            if (hay === needle)
-                score = 100;
-            else if (hay.startsWith(needle) || needle.startsWith(hay))
-                score = 80;
-            else if (hay.includes(needle) || needle.includes(hay))
-                score = 60;
-            else {
-                // Count matching words
-                const needleWords = needle.split('');
-                let matches = 0;
-                for (const ch of needleWords)
-                    if (hay.includes(ch))
-                        matches++;
-                score = Math.floor((matches / Math.max(needle.length, 1)) * 40);
-            }
-            if (!best || score > best.score)
-                best = { session: r.session, score };
-        }
-        // Only use if score is reasonable
-        return best && best.score >= 40 ? best.session : results[0].session;
-    }
-    catch {
-        return null;
-    }
-}
 // AniList ID → metadata + site-specific IDs
 async function getSiteIds(anilistId) {
     const cacheKey = `siteids:${anilistId}`;
     const cached = (0, cache_1.cacheGet)(cacheKey);
-    if (cached)
-        return cached;
+    if (cached) {
+        const wasMissingAnimeHeaven = !cached.siteIds.animeheaven;
+        const enriched = await enrichAnimeHeaven(cached);
+        if (wasMissingAnimeHeaven && enriched.siteIds.animeheaven)
+            (0, cache_1.cacheSet)(cacheKey, enriched);
+        return enriched;
+    }
     // Build result shell using AniList (always reliable for title + malId)
     const alInfo = await getAnilistTitle(anilistId).catch(() => ({ title: 'Unknown', malId: null }));
     const result = {
@@ -101,8 +76,6 @@ async function getSiteIds(anilistId) {
                 result.siteIds.zoro = m.id;
             if (m.providerId === 'gogoanime')
                 result.siteIds.gogoanime = m.id;
-            if (m.providerId === 'animepahe')
-                result.siteIds.animepahe = m.id;
             if (m.providerId === 'mal' && !result.malId)
                 result.malId = parseInt(m.id);
         }
@@ -110,12 +83,7 @@ async function getSiteIds(anilistId) {
     catch {
         // Anify down or missing — fall through to direct scraper fallbacks below
     }
-    // If Anify didn't give us an AnimePahe session, search directly
-    if (!result.siteIds.animepahe && result.title !== 'Unknown') {
-        const session = await findPaheSession(result.title);
-        if (session)
-            result.siteIds.animepahe = session;
-    }
+    await enrichAnimeHeaven(result);
     // If still no zoro ID, try a slug guess (title-anilistId format common on HiAnime clones)
     // This is a heuristic and may not always work
     if (!result.siteIds.zoro && result.title !== 'Unknown') {

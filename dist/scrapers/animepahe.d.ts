@@ -1,3 +1,4 @@
+export declare function hasAnimePaheCookieConfig(): boolean;
 export interface PaheEpisode {
     num: number;
     session: string;

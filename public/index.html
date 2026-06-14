@@ -313,12 +313,12 @@ pre { padding:20px; overflow-x:auto; font-family:var(--mono); font-size:12px; li
       <div class="source-info-card">
         <div class="sic-header">
           <div class="sic-icon">🎭</div>
-          <div><div class="sic-name">AnimePahe</div><div class="sic-url">animepahe.ru</div></div>
-          <span class="sic-tag works">Public API</span>
+          <div><div class="sic-name">AnimeHeaven</div><div class="sic-url">animeheaven.me</div></div>
+          <span class="sic-tag works">Direct MP4</span>
         </div>
-        <div class="sic-row"><span class="sic-row-label">Key</span><span class="sic-row-val">animepahe</span></div>
-        <div class="sic-row"><span class="sic-row-label">ID format</span><span class="sic-row-val">Session UUID</span></div>
-        <div class="sic-row"><span class="sic-row-label">Embeds</span><span class="sic-row-val">Kwik.si</span></div>
+        <div class="sic-row"><span class="sic-row-label">Key</span><span class="sic-row-val">animeheaven</span></div>
+        <div class="sic-row"><span class="sic-row-label">ID format</span><span class="sic-row-val">AnimeHeaven show ID</span></div>
+        <div class="sic-row"><span class="sic-row-label">Streams</span><span class="sic-row-val">Direct MP4</span></div>
         <div class="sic-row"><span class="sic-row-label">Audio</span><span class="sic-row-val">Sub only</span></div>
       </div>
     </div>
@@ -336,7 +336,7 @@ pre { padding:20px; overflow-x:auto; font-family:var(--mono); font-size:12px; li
 GET /api/watch/<span class="str">senshi</span>/<span class="num">20</span>/<span class="num">1</span>/<span class="str">sub</span>
 GET /api/watch/<span class="str">dao</span>/mal-<span class="num">21</span>/<span class="num">5</span>/<span class="str">dub</span>
 GET /api/watch/<span class="str">wave</span>/<span class="num">1535</span>/<span class="num">12</span>/<span class="str">sub</span>?server=Vidstreaming
-GET /api/watch/<span class="str">animepahe</span>/mal-<span class="num">21</span>/<span class="num">3</span>/<span class="str">sub</span></pre>
+GET /api/watch/<span class="str">animeheaven</span>/<span class="str">{heavenId}</span>/<span class="num">3</span>/<span class="str">sub</span></pre>
     </div>
     <div class="code-block">
       <div class="code-header">Query-based (compat) <button class="copy-btn" onclick="copyBlock(this)">Copy</button></div>
@@ -409,7 +409,7 @@ GET /api/watch?source=<span class="str">dao</span>&malId=<span class="num">21</s
   <span class="key">"siteIds"</span>: {
     <span class="key">"zoro"</span>: <span class="str">"naruto-225"</span>,       <span class="cmt">// used by senshi, dao, wave</span>
     <span class="key">"gogoanime"</span>: <span class="str">"naruto"</span>,
-    <span class="key">"animepahe"</span>: <span class="str">"9f5dfa2e-4a1b-..."</span>
+    <span class="key">"animeheaven"</span>: <span class="str">"ukr6y"</span>
   }
 }</pre>
         </div>
@@ -429,7 +429,7 @@ GET /api/watch?source=<span class="str">dao</span>&malId=<span class="num">21</s
           <thead><tr><th>Param</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
           <tbody>
             <tr><td class="param-name">anilistId / malId</td><td class="param-type">number</td><td><span class="req-badge">one required</span></td><td>Anime identifier</td></tr>
-            <tr><td class="param-name">source</td><td class="param-type">string</td><td><span class="opt-badge">optional</span></td><td>senshi · dao · wave · animepahe (default: senshi)</td></tr>
+            <tr><td class="param-name">source</td><td class="param-type">string</td><td><span class="opt-badge">optional</span></td><td>senshi · dao · wave · animeheaven (default: senshi)</td></tr>
           </tbody>
         </table>
         <div class="code-block">
@@ -487,7 +487,7 @@ GET /api/watch?source=<span class="str">dao</span>&malId=<span class="num">21</s
         <table class="params-table">
           <thead><tr><th>Param</th><th>Type</th><th>Where</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td class="param-name">source</td><td class="param-type">string</td><td>path</td><td>senshi · dao · wave · animepahe</td></tr>
+            <tr><td class="param-name">source</td><td class="param-type">string</td><td>path</td><td>senshi · dao · wave · animeheaven</td></tr>
             <tr><td class="param-name">id</td><td class="param-type">string</td><td>path</td><td>AniList ID or "mal-{malId}"</td></tr>
             <tr><td class="param-name">ep</td><td class="param-type">number</td><td>path</td><td>Episode number</td></tr>
             <tr><td class="param-name">type</td><td class="param-type">string</td><td>path</td><td>sub · dub · raw</td></tr>
@@ -526,7 +526,7 @@ GET /api/watch?source=<span class="str">dao</span>&malId=<span class="num">21</s
           <pre>{
   <span class="key">"status"</span>: <span class="str">"ok"</span>,
   <span class="key">"version"</span>: <span class="str">"1.0.0"</span>,
-  <span class="key">"sources"</span>: [<span class="str">"senshi"</span>, <span class="str">"dao"</span>, <span class="str">"wave"</span>, <span class="str">"animepahe"</span>],
+  <span class="key">"sources"</span>: [<span class="str">"senshi"</span>, <span class="str">"dao"</span>, <span class="str">"wave"</span>, <span class="str">"animeheaven"</span>],
   <span class="key">"uptime"</span>: <span class="num">3600</span>,
   <span class="key">"timestamp"</span>: <span class="str">"2026-06-04T12:00:00.000Z"</span>
 }</pre>
@@ -539,7 +539,7 @@ GET /api/watch?source=<span class="str">dao</span>&malId=<span class="num">21</s
   <!-- ═══════════════════════════════════════ TESTER ═══════════════════════════════════════ -->
   <section class="section" id="tester">
     <div class="section-title">API Tester</div>
-    <div class="section-sub">Search for an anime, pick your source and server, then fetch live stream data.</div>
+        <div class="section-sub">Search for an anime, pick your source and server, then fetch live stream data. AnimeHeaven can also use a manual show id.</div>
 
     <div class="tester-wrap">
       <div class="tester-top">
@@ -576,6 +576,13 @@ GET /api/watch?source=<span class="str">dao</span>&malId=<span class="num">21</s
             </div>
           </div>
           <button class="clear-btn" onclick="clearSelection()">×</button>
+        </div>
+
+        <!-- ANIMEHEAVEN ID -->
+        <div id="heavenIdWrap" style="margin-bottom:20px;display:none">
+          <label class="field-label">AnimeHeaven ID</label>
+          <input class="field-input" id="heavenIdInput" placeholder="Paste AnimeHeaven anime id, e.g. ukr6y" autocomplete="off" />
+          <div style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:6px">Use this when title mapping misses the exact AnimeHeaven show.</div>
         </div>
 
         <!-- EP / TYPE / ENDPOINT -->
@@ -620,10 +627,10 @@ GET /api/watch?source=<span class="str">dao</span>&malId=<span class="num">21</s
             <span class="source-name">AniDao</span>
             <span class="source-url">anidao.to</span>
           </div>
-          <div class="source-card" onclick="setSource('animepahe',this)" id="src-animepahe">
+          <div class="source-card" onclick="setSource('animeheaven',this)" id="src-animeheaven">
             <div class="source-icon">🎭</div>
-            <span class="source-name">AnimePahe</span>
-            <span class="source-url">animepahe.ru</span>
+            <span class="source-name">AnimeHeaven</span>
+            <span class="source-url">animeheaven.me</span>
           </div>
         </div>
 
@@ -773,6 +780,7 @@ function setSource(s, card) {
   selSource = s;
   document.querySelectorAll('.source-card').forEach(c => c.classList.remove('active'));
   card.classList.add('active');
+  document.getElementById('heavenIdWrap').style.display = s === 'animeheaven' ? 'block' : 'none';
   resetServers();
   updateUrlPreview();
   if (selAnime && document.getElementById('epInput').value) loadServers();
@@ -800,11 +808,19 @@ function selectServer(chip) {
 function resetServers() {
   selServer = '';
   document.getElementById('serverChips').innerHTML =
-    '<div class="server-chip auto active" data-server="" onclick="selectServer(this)">⚡ Auto</div>';
+    '<div class="server-chip auto active" data-server="" onclick="selectServer(this)">Auto</div>';
 }
+
+function getHeavenId() {
+  return document.getElementById('heavenIdInput')?.value.trim() || '';
+}
+
 async function loadServers() {
   const ep = document.getElementById('epInput').value;
-  if (!selAnime || !ep || selSource === 'animepahe') return;
+  const heavenId = getHeavenId();
+  if (!ep) return;
+  if (selSource !== 'animeheaven' && !selAnime) return;
+  if (selSource === 'animeheaven' && !selAnime && !heavenId) return;
 
   const label = document.getElementById('serverLoadingLabel');
   label.style.display = 'inline';
@@ -813,7 +829,10 @@ async function loadServers() {
 
   try {
     const base = getBase();
-    const res = await fetch(`${base}/api/servers?anilistId=${selAnime.id}&ep=${ep}&type=${selType}&source=${selSource}`);
+    const serverUrl = selSource === 'animeheaven' && heavenId
+      ? `${base}/api/servers?source=animeheaven&heavenId=${encodeURIComponent(heavenId)}&ep=${ep}&type=${selType}`
+      : `${base}/api/servers?anilistId=${selAnime.id}&ep=${ep}&type=${selType}&source=${selSource}`;
+    const res = await fetch(serverUrl);
     const data = await res.json();
     const servers = data.servers || [];
     servers.forEach(s => {
@@ -909,9 +928,15 @@ function clearSelection() {
 
 // ── URL PREVIEW
 function buildUrl() {
-  if (!selAnime) return null;
   const base = getBase();
   const ep = document.getElementById('epInput').value || '1';
+  const heavenId = getHeavenId();
+  if (selSource === 'animeheaven' && heavenId) {
+    if (selEndpoint === 'watch') return `${base}/api/watch?source=animeheaven&heavenId=${encodeURIComponent(heavenId)}&ep=${ep}&type=${selType}`;
+    if (selEndpoint === 'servers') return `${base}/api/servers?source=animeheaven&heavenId=${encodeURIComponent(heavenId)}&ep=${ep}&type=${selType}`;
+    if (selEndpoint === 'episodes') return `${base}/api/episodes?source=animeheaven&heavenId=${encodeURIComponent(heavenId)}`;
+  }
+  if (!selAnime) return null;
   const id = selAnime.id;
   if (selEndpoint === 'watch') {
     let url = `${base}/api/watch/${selSource}/${id}/${ep}/${selType}`;
@@ -927,7 +952,7 @@ function updateUrlPreview() {
   const el = document.getElementById('urlPreview');
   el.innerHTML = url
     ? `<span style="color:var(--accent2)">GET</span> <span style="color:var(--text)">${url}</span>`
-    : '<span style="color:var(--muted)">Select an anime to see the generated URL</span>';
+    : '<span style="color:var(--muted)">Select an anime, or paste an AnimeHeaven id</span>';
 }
 
 // ── FETCH
@@ -939,9 +964,14 @@ function escapeAttr(value) {
   return String(value).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
 }
 
+function primaryEmbedUrl(data) {
+  return data.streamUrl || data.mp4ProxyUrl || data.mp4 || data.embedUrl || data.servers?.[0]?.url || data.servers?.[0]?.sourceId || '';
+}
+
 function renderEmbedPreview(data) {
   const ep = document.getElementById('embedPreview');
-  const hlsUrl = data.hlsProxyUrl || data.m3u8 || (data.embedUrl && data.embedUrl.includes('.m3u8') ? data.embedUrl : '');
+  const embedUrl = primaryEmbedUrl(data);
+  const hlsUrl = data.hlsProxyUrl || data.m3u8 || (embedUrl && embedUrl.includes('.m3u8') ? embedUrl : '');
 
   if (hlsUrl) {
     ep.innerHTML = `<video id="hlsPreview" controls playsinline></video>`;
@@ -958,8 +988,13 @@ function renderEmbedPreview(data) {
     return;
   }
 
-  if (data.embedUrl) {
-    ep.innerHTML = `<iframe src="${escapeAttr(data.embedUrl)}" allowfullscreen allow="autoplay; fullscreen; picture-in-picture"></iframe>`;
+  if (data.mp4 || data.playbackMode === 'mp4') {
+    ep.innerHTML = `<video controls playsinline src="${escapeAttr(embedUrl)}"></video>`;
+    return;
+  }
+
+  if (embedUrl) {
+    ep.innerHTML = `<iframe src="${escapeAttr(embedUrl)}" allowfullscreen allow="autoplay; fullscreen; picture-in-picture"></iframe>`;
   } else {
     ep.innerHTML = '<div class="embed-placeholder"><div class="embed-placeholder-icon">!</div><span>No embed URL returned</span></div>';
   }
@@ -967,7 +1002,7 @@ function renderEmbedPreview(data) {
 
 async function doFetch() {
   const url = buildUrl();
-  if (!url) { alert('Search and select an anime first.'); return; }
+  if (!url) { alert('Search and select an anime first, or paste an AnimeHeaven id.'); return; }
 
   const btn = document.getElementById('fetchBtn');
   btn.disabled = true; btn.textContent = '⏳ Fetching...';
@@ -997,23 +1032,31 @@ async function doFetch() {
 
     // stream cards
     if (selEndpoint === 'watch') {
+      const embedUrl = primaryEmbedUrl(data);
+      const serverNames = data.availableServers || (data.servers || []).map(s => s.quality || s.name).filter(Boolean);
       document.getElementById('streamCards').innerHTML = `
         <div class="stream-card" style="grid-column:1/-1">
-          <div class="stream-card-label">Embed URL</div>
-          <div class="stream-card-val">${data.embedUrl ? `<a href="${data.embedUrl}" target="_blank">${data.embedUrl}</a>` : '<span class="null-val">null</span>'}</div>
+          <div class="stream-card-label">Stream URL</div>
+          <div class="stream-card-val">${embedUrl ? `<a href="${embedUrl}" target="_blank">${embedUrl}</a>` : '<span class="null-val">null</span>'}</div>
         </div>
         <div class="stream-card" style="grid-column:1/-1">
           <div class="stream-card-label">m3u8 (HLS)</div>
-          <div class="stream-card-val">${data.m3u8 ? `<a href="${data.m3u8}" target="_blank">${data.m3u8}</a>` : '<span class="null-val">null — use embedUrl in iframe</span>'}</div>
+          <div class="stream-card-val">${data.m3u8 ? `<a href="${data.m3u8}" target="_blank">${data.m3u8}</a>` : '<span class="null-val">null</span>'}</div>
         </div>
+        ${data.mp4ProxyUrl ? `<div class="stream-card" style="grid-column:1/-1"><div class="stream-card-label">Playable MP4 Proxy</div><div class="stream-card-val"><a href="${data.mp4ProxyUrl}" target="_blank">${data.mp4ProxyUrl}</a></div></div>` : ''}
+        ${data.rawStreamUrl ? `<div class="stream-card" style="grid-column:1/-1"><div class="stream-card-label">Raw MP4</div><div class="stream-card-val"><a href="${data.rawStreamUrl}" target="_blank">${data.rawStreamUrl}</a></div></div>` : ''}
         ${data.hlsProxyUrl ? `<div class="stream-card" style="grid-column:1/-1"><div class="stream-card-label">Playable HLS Proxy</div><div class="stream-card-val"><a href="${data.hlsProxyUrl}" target="_blank">${data.hlsProxyUrl}</a></div></div>` : ''}
+        <div class="stream-card">
+          <div class="stream-card-label">Playback Mode</div>
+          <div class="stream-card-val">${data.playbackMode || '<span class="null-val">unknown</span>'}</div>
+        </div>
         <div class="stream-card">
           <div class="stream-card-label">Server Used</div>
           <div class="stream-card-val">${data.server || '<span class="null-val">—</span>'}</div>
         </div>
         <div class="stream-card">
           <div class="stream-card-label">Available Servers</div>
-          <div class="stream-card-val">${(data.availableServers||[]).join(', ') || '<span class="null-val">—</span>'}</div>
+          <div class="stream-card-val">${serverNames.join(', ') || '<span class="null-val">-</span>'}</div>
         </div>
         <div class="stream-card">
           <div class="stream-card-label">Subtitles</div>
@@ -1063,6 +1106,11 @@ document.addEventListener('click', e => {
 // ── BASE URL INPUT triggers URL preview update
 document.getElementById('baseUrl').addEventListener('input', updateUrlPreview);
 document.getElementById('epInput').addEventListener('input', updateUrlPreview);
+document.getElementById('heavenIdInput').addEventListener('input', () => {
+  resetServers();
+  updateUrlPreview();
+  loadServers();
+});
 </script>
 </body>
 </html>

@@ -19,6 +19,7 @@ Open `http://localhost:3000` for the interactive docs + tester.
 
 ---
 
+
 ## Deploy on Railway
 
 1. Push this repo to GitHub
@@ -40,19 +41,20 @@ Get anime metadata and site-specific IDs.
 
 ### `GET /api/episodes?anilistId=20&source=senshi`
 Get full episode list from a source.
-- `source`: `senshi` | `dao` | `wave` | `animepahe` (default: `senshi`)
+- `source`: `senshi` | `dao` | `wave` | `animeheaven` (default: `senshi`)
 
 ### `GET /api/servers?anilistId=20&ep=1&type=sub&source=senshi`
 Get all available servers for an episode before fetching a stream.
 
 ### `GET /api/watch/{source}/{id}/{ep}/{type}`
-Get embed URL + m3u8 for an episode.
+Get embed URL plus m3u8 or direct MP4 for an episode.
 
 ```
 GET /api/watch/senshi/20/1/sub
 GET /api/watch/dao/mal-21/5/dub
 GET /api/watch/wave/1535/12/sub?server=Vidstreaming
-GET /api/watch/animepahe/mal-21/3/sub
+GET /api/watch/animeheaven/{heavenId}/3/sub
+GET /api/watch?source=animeheaven&heavenId={heavenId}&ep=3&type=sub
 ```
 
 **`id`** can be:
@@ -82,7 +84,7 @@ GET /api/watch/animepahe/mal-21/3/sub
 }
 ```
 
-> If `m3u8` is null, use `embedUrl` in an `<iframe>` directly. The `note` field explains why.
+> If `m3u8` is null, check `mp4` / `streamUrl` first. Some sources, including AnimeHeaven, expose direct MP4 instead of HLS.
 
 ### `GET /api/health`
 Server health, uptime, and cache stats.
@@ -96,7 +98,7 @@ Server health, uptime, and cache stats.
 | `senshi` | senshi.live | Zoro-style | Verify CSS selectors |
 | `wave` | aniwaves.ru | Zoro-style | Verify CSS selectors |
 | `dao` | anidao.to | Zoro-style | Verify CSS selectors |
-| `animepahe` | animepahe.ru | Public API | Most reliable |
+| `animeheaven` | animeheaven.me | Direct MP4 source | Returns direct MP4 sources; no HLS on current site |
 
 ---
 
@@ -163,7 +165,7 @@ src/
     senshi.ts        ← senshi.live scraper
     aniwaves.ts      ← aniwaves.ru scraper
     anidao.ts        ← anidao.to scraper
-    animepahe.ts     ← animepahe.ru scraper
+    animeheaven.ts     ← animeheaven.me scraper
   resolvers/
     megacloud.ts     ← Megacloud/Vidstreaming AES decryptor
   utils/
@@ -192,3 +194,4 @@ Cache TTLs (configurable via `.env`):
 ---
 
 *Educational project. For personal use only.*
+

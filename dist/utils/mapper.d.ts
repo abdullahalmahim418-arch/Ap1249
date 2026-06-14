@@ -5,7 +5,7 @@ export interface SiteIds {
     siteIds: {
         zoro?: string;
         gogoanime?: string;
-        animepahe?: string;
+        animeheaven?: string;
         anidao?: string;
     };
 }

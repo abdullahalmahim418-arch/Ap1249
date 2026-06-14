@@ -23,9 +23,10 @@ function makeClient(baseURL, referer, extra) {
         },
     });
 }
-function makeAjaxClient(baseURL, referer) {
+function makeAjaxClient(baseURL, referer, extra) {
     return makeClient(baseURL, referer, {
         'Accept': 'application/json, text/javascript, */*; q=0.01',
+        ...extra,
     });
 }
 exports.anilistClient = axios_1.default.create({

@@ -32,16 +32,74 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.hasAnimePaheCookieConfig = hasAnimePaheCookieConfig;
 exports.searchAnimePahe = searchAnimePahe;
 exports.getPaheEpisodes = getPaheEpisodes;
 exports.getPaheEmbeds = getPaheEmbeds;
 const cheerio = __importStar(require("cheerio"));
+const fs_1 = __importDefault(require("fs"));
+const path_1 = __importDefault(require("path"));
 const fetch_1 = require("../utils/fetch");
 const cache_1 = require("../utils/cache");
 const BASE = 'https://animepahe.pw';
-const http = (0, fetch_1.makeClient)(BASE, BASE + '/');
-const ajax = (0, fetch_1.makeAjaxClient)(BASE, BASE + '/');
+function loadLocalEnv() {
+    const envPath = path_1.default.resolve(process.cwd(), '.env');
+    if (!fs_1.default.existsSync(envPath))
+        return;
+    for (const rawLine of fs_1.default.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#'))
+            continue;
+        const eq = line.indexOf('=');
+        if (eq === -1)
+            continue;
+        const key = line.slice(0, eq).trim();
+        let value = line.slice(eq + 1).trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+        }
+        if (!(key in process.env))
+            process.env[key] = value;
+    }
+}
+loadLocalEnv();
+function buildCookieHeader() {
+    const raw = process.env.ANIMEPAHE_COOKIE?.trim();
+    if (raw)
+        return raw.replace(/^Cookie:\s*/i, '').trim();
+    const parts = [];
+    if (process.env.ANIMEPAHE_CF_CLEARANCE)
+        parts.push(`cf_clearance=${process.env.ANIMEPAHE_CF_CLEARANCE.trim()}`);
+    if (process.env.ANIMEPAHE_SESSION)
+        parts.push(`session=${process.env.ANIMEPAHE_SESSION.trim()}`);
+    if (process.env.ANIMEPAHE_PHPSESSID)
+        parts.push(`PHPSESSID=${process.env.ANIMEPAHE_PHPSESSID.trim()}`);
+    return parts.join('; ');
+}
+function hasAnimePaheCookieConfig() {
+    return Boolean(buildCookieHeader());
+}
+function animePaheHeaders() {
+    const headers = {
+        'User-Agent': process.env.ANIMEPAHE_USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': process.env.ANIMEPAHE_ACCEPT_LANGUAGE || 'en-US,en;q=0.9',
+        'Referer': process.env.ANIMEPAHE_REFERER || `${BASE}/`,
+        'Origin': BASE,
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+    };
+    const cookie = buildCookieHeader();
+    if (cookie)
+        headers.Cookie = cookie;
+    return headers;
+}
+const http = (0, fetch_1.makeClient)(BASE, BASE + '/', animePaheHeaders());
+const ajax = (0, fetch_1.makeAjaxClient)(BASE, BASE + '/', animePaheHeaders());
 // Search AnimePahe
 async function searchAnimePahe(query) {
     const cacheKey = `pahe:search:${query}`;
