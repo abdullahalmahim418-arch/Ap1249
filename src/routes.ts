@@ -8,7 +8,7 @@ import { getEpisodes, getServers, getEmbedUrl } from './scrapers/senshi';
 import { getDaoEpisodes, getDaoServers, getDaoEmbedUrl } from './scrapers/anidao';
 import { getWaveEpisodes, getWaveServers, getWaveEmbedUrl } from './scrapers/aniwaves';
 import { getHeavenEpisodes, getHeavenServers, getHeavenStream } from './scrapers/animeheaven';
-import { getMiruroEpisodes, getMiruroServers, getMiruroEmbedUrl } from './scrapers/miruro';
+import { getMiruroEpisodes, getMiruroServers, getMiruroEmbedUrl, getMiruroDebug } from './scrapers/miruro';
 
 const router = Router();
 
@@ -292,6 +292,22 @@ async function watchHandler(req: Request, res: Response) {
 }
 
 router.get('/watch/:source/:id/:ep/:type', watchHandler);
+
+// Debug endpoint: dumps raw Miruro pipe responses + stream probe results
+// for an episode, so individual providers (bonk/bee/moo/etc) can be
+// inspected directly without going through the normal watch flow.
+router.get('/debug/miruro/:anilistId/:ep', async (req: Request, res: Response) => {
+  const anilistId = parseInt(req.params.anilistId);
+  const num = parseInt(req.params.ep);
+  if (isNaN(anilistId) || isNaN(num)) return res.status(400).json({ error: 'Invalid anilistId or episode number' });
+
+  try {
+    const debug = await getMiruroDebug(anilistId, num);
+    res.json(debug);
+  } catch (e: any) {
+    res.status(500).json({ error: 'Debug fetch failed', detail: e?.message || String(e) });
+  }
+});
 
 router.get('/proxy/hls', async (req: Request, res: Response) => {
   const url = req.query.url as string | undefined;
