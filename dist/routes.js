@@ -425,7 +425,7 @@ router.get('/watch', async (req, res) => {
     return watchHandler(req, res);
 });
 router.get('/health', (_req, res) => {
-    res.json({ status: 'ok', version: '1.0.0', sources: SOURCES, uptime: Math.floor(process.uptime()), cache: (0, cache_1.cacheStats)(), timestamp: new Date().toISOString() });
+    res.json({ status: 'ok', version: '1.0.1-miruro-debug', sources: SOURCES, uptime: Math.floor(process.uptime()), cache: (0, cache_1.cacheStats)(), timestamp: new Date().toISOString() });
 });
 exports.default = router;
 //# sourceMappingURL=routes.js.map
