@@ -412,7 +412,7 @@ router.get('/watch', async (req: Request, res: Response) => {
 });
 
 router.get('/health', (_req, res) => {
-  res.json({ status: 'ok', version: '1.0.0', sources: SOURCES, uptime: Math.floor(process.uptime()), cache: cacheStats(), timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: '1.0.1-miruro-debug', sources: SOURCES, uptime: Math.floor(process.uptime()), cache: cacheStats(), timestamp: new Date().toISOString() });
 });
 
 export default router;
