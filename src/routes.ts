@@ -422,6 +422,98 @@ router.get('/watch', async (req: Request, res: Response) => {
   return watchHandler(req, res);
 });
 
+
+// ── DEBUG: dump raw miruro pipe sources (remove before production) ──────────
+router.get('/debug/miruro-sources', async (req: Request, res: Response) => {
+  const { anilistId, provider, category, episodeId } = req.query as Record<string, string>;
+  if (!anilistId || !provider || !category || !episodeId) {
+    return res.status(400).json({ error: 'Required: anilistId, provider, category, episodeId' });
+  }
+  try {
+    const { getMiruroEmbedUrl } = await import('./scrapers/miruro');
+    // sourceId format: anilistId::provider::category::episodeId
+    const sourceId = `${anilistId}::${provider}::${category}::${episodeId}`;
+    
+    // Call fetchSources directly by re-implementing inline here for debug visibility
+    const axios2 = (await import('axios')).default;
+    const { Buffer: Buf } = await import('buffer');
+    const zlib2 = await import('zlib');
+    
+    const PIPE_URL = 'https://www.miruro.tv/api/secure/pipe';
+    const H = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+      'Referer': 'https://www.miruro.tv/',
+      'Origin': 'https://www.miruro.tv',
+    };
+    const encId = Buf.from(episodeId).toString('base64url');
+    const payload = { path: 'sources', method: 'GET', query: { episodeId: encId, provider, category, anilistId: parseInt(anilistId) }, body: null, version: '0.1.0' };
+    const encodedReq = Buf.from(JSON.stringify(payload)).toString('base64url');
+    const r = await axios2.get(`${PIPE_URL}?e=${encodedReq}`, { headers: H, timeout: 15000, responseType: 'text', transformResponse: (d: any) => d });
+    const padded = r.data + '='.repeat((4 - (r.data.length % 4)) % 4);
+    const raw = JSON.parse(zlib2.gunzipSync(Buf.from(padded, 'base64url')).toString('utf-8'));
+    
+    return res.json({ sourceId, raw });
+  } catch (e: any) {
+    return res.status(500).json({ error: String(e?.message || e), stack: String(e?.stack || '') });
+  }
+});
+
+
+// ── DEBUG: inspect raw miruro pipe sources for a provider ──────────────────
+// GET /api/debug/miruro?anilistId=21&provider=bonk&ep=1&category=sub
+router.get('/debug/miruro', async (req: Request, res: Response) => {
+  try {
+    const anilistId = parseInt(req.query.anilistId as string);
+    const provider  = (req.query.provider  as string) || 'bonk';
+    const epNum     = parseInt((req.query.ep as string) || '1');
+    const category  = ((req.query.category as string) || 'sub') as 'sub' | 'dub' | 'raw';
+
+    if (isNaN(anilistId)) return res.status(400).json({ error: 'anilistId required' });
+
+    const servers = await getMiruroServers(`${anilistId}:${epNum}`);
+    const match   = servers.find(s => s.name === `${provider}-${category}`);
+    if (!match) return res.json({ error: 'server not found', available: servers.map(s => s.name) });
+
+    // Pull the raw episode ID out of the sourceId
+    const parts        = match.sourceId.split('::');
+    const rawEpisodeId = parts.slice(3).join('::');
+
+    // Re-encode and call the pipe directly (same as fetchSources does internally)
+    const { Buffer } = await import('buffer');
+    const zlib        = await import('zlib');
+    const encId       = Buffer.from(rawEpisodeId).toString('base64url');
+    const payload     = { path: 'sources', method: 'GET', query: { episodeId: encId, provider, category, anilistId }, body: null, version: '0.1.0' };
+    const encodedReq  = Buffer.from(JSON.stringify(payload)).toString('base64url');
+
+    const pipeRes = await axios.get(`https://www.miruro.tv/api/secure/pipe?e=${encodedReq}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        'Referer': 'https://www.miruro.tv/',
+      },
+      timeout: 15000,
+      responseType: 'text',
+      transformResponse: (d: any) => d,
+    });
+
+    const padded       = pipeRes.data + '='.repeat((4 - (pipeRes.data.length % 4)) % 4);
+    const compressed   = Buffer.from(padded, 'base64url');
+    const decompressed = zlib.gunzipSync(compressed);
+    const raw          = JSON.parse(decompressed.toString('utf-8'));
+
+    return res.json({
+      sourceId:     match.sourceId,
+      rawEpisodeId,
+      pipeTopLevelKeys: Object.keys(raw),
+      streams:      raw.streams ?? null,
+      headers:      raw.headers ?? null,
+      intro:        raw.intro   ?? null,
+      raw,
+    });
+  } catch (e: any) {
+    return res.status(500).json({ error: String(e?.message || e), stack: e?.stack });
+  }
+});
+
 router.get('/health', (_req, res) => {
   res.json({ status: 'ok', version: '1.0.1-miruro-debug', sources: SOURCES, uptime: Math.floor(process.uptime()), cache: cacheStats(), timestamp: new Date().toISOString() });
 });
