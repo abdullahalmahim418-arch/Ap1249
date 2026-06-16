@@ -157,16 +157,7 @@ async function getMiruroServers(episodeId) {
     }
     return servers;
 }
-// ---- FEATURE: Probe a candidate m3u8 URL to confirm it actually serves a playlist ----
-/**
- * Some Miruro providers (bonk, moo, bee, ...) occasionally return stream
- * entries whose URL responds with a JSON error body (e.g. `{"error":"Invalid
- * request (fail)"}`) instead of an actual m3u8 playlist - usually because the
- * upstream link expired or the required referer no longer matches. We probe
- * the URL with the stream's own referer and only accept it if the body looks
- * like a real HLS playlist.
- */
-async function isPlayableM3u8(url, referer) {
+async function probeM3u8(url, referer) {
     try {
         const res = await axios_1.default.get(url, {
             timeout: 8000,
@@ -179,13 +170,17 @@ async function isPlayableM3u8(url, referer) {
                 Accept: '*/*',
             },
         });
-        if (res.status < 200 || res.status >= 300)
-            return false;
         const body = typeof res.data === 'string' ? res.data.trim() : '';
-        return body.startsWith('#EXTM3U');
+        const ok = res.status >= 200 && res.status < 300 && body.startsWith('#EXTM3U');
+        return {
+            ok,
+            status: res.status,
+            contentType: String(res.headers['content-type'] ?? ''),
+            snippet: body.slice(0, 200),
+        };
     }
-    catch {
-        return false;
+    catch (e) {
+        return { ok: false, error: e?.message || String(e) };
     }
 }
 async function getMiruroEmbedUrl(sourceId) {
@@ -218,7 +213,8 @@ async function getMiruroEmbedUrl(sourceId) {
         // instead of a real playlist (this happens for some providers).
         for (const candidate of sorted) {
             const referer = typeof candidate.referer === 'string' && candidate.referer ? candidate.referer : undefined;
-            if (await isPlayableM3u8(candidate.url, referer)) {
+            const probe = await probeM3u8(candidate.url, referer);
+            if (probe.ok) {
                 return {
                     embedUrl: candidate.url,
                     serverName: provider,
