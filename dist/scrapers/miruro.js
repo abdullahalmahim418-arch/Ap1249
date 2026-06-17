@@ -157,32 +157,6 @@ async function getMiruroServers(episodeId) {
     }
     return servers;
 }
-async function probeM3u8(url, referer) {
-    try {
-        const res = await axios_1.default.get(url, {
-            timeout: 8000,
-            responseType: 'text',
-            transformResponse: (d) => d,
-            validateStatus: () => true,
-            headers: {
-                'User-Agent': HEADERS['User-Agent'],
-                Referer: referer || HEADERS.Referer,
-                Accept: '*/*',
-            },
-        });
-        const body = typeof res.data === 'string' ? res.data.trim() : '';
-        const ok = res.status >= 200 && res.status < 300 && body.startsWith('#EXTM3U');
-        return {
-            ok,
-            status: res.status,
-            contentType: String(res.headers['content-type'] ?? ''),
-            snippet: body.slice(0, 200),
-        };
-    }
-    catch (e) {
-        return { ok: false, error: e?.message || String(e) };
-    }
-}
 async function getMiruroEmbedUrl(sourceId) {
     const parts = sourceId.split('::');
     if (parts.length < 4)
@@ -198,6 +172,10 @@ async function getMiruroEmbedUrl(sourceId) {
         if (!Array.isArray(streams) || streams.length === 0)
             return null;
         // Prefer an active stream if marked, otherwise the highest-quality one.
+        // We do NOT probe/prefetch the URL — providers like bonk, moo, and bee
+        // return single-use or referer-sensitive signed URLs that get consumed or
+        // invalidated by a preflight GET, making them unplayable by the time the
+        // client requests them. Trust the URL as-is and let the HLS proxy handle it.
         const sorted = [...streams]
             .filter((s) => typeof s?.url === 'string' && /^https?:\/\//i.test(s.url))
             .sort((a, b) => {
@@ -209,21 +187,16 @@ async function getMiruroEmbedUrl(sourceId) {
             const qb = parseInt(String(b.quality ?? '').replace(/\D/g, '')) || 0;
             return qb - qa;
         });
-        // Try each candidate in order, skipping any that return an error body
-        // instead of a real playlist (this happens for some providers).
-        for (const candidate of sorted) {
-            const referer = typeof candidate.referer === 'string' && candidate.referer ? candidate.referer : undefined;
-            const probe = await probeM3u8(candidate.url, referer);
-            if (probe.ok) {
-                return {
-                    embedUrl: candidate.url,
-                    serverName: provider,
-                    type: 'hls',
-                    referer,
-                };
-            }
-        }
-        return null;
+        const best = sorted[0];
+        if (!best)
+            return null;
+        const referer = typeof best.referer === 'string' && best.referer ? best.referer : undefined;
+        return {
+            embedUrl: best.url,
+            serverName: provider,
+            type: 'hls',
+            referer,
+        };
     }
     catch {
         return null;

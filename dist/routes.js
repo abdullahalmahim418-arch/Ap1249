@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -237,11 +270,9 @@ async function watchHandler(req, res) {
             allServers = await (0, animeheaven_1.getHeavenServers)(episode.id);
         if (source === 'miruro')
             allServers = await (0, miruro_1.getMiruroServers)(episode.id);
-        let filtered = allServers.filter((s) => s.type === type);
+        const filtered = allServers.filter((s) => s.type === type);
         if (!filtered.length)
-            filtered = allServers.filter((s) => s.type === 'sub');
-        if (!filtered.length)
-            return res.status(404).json({ error: `No servers found for ep ${epNum}` });
+            return res.status(404).json({ error: `No ${type} stream available on ${source} for ep ${epNum}` });
         if (preferredServer) {
             filtered.sort((a, b) => {
                 const aM = a.name.toLowerCase().includes(preferredServer.toLowerCase()) ? -1 : 1;
@@ -295,6 +326,31 @@ async function watchHandler(req, res) {
                 note: 'AnimeHeaven currently exposes direct MP4 sources, not m3u8/HLS.',
             });
         }
+        // Miruro streams are always direct HLS — skip megacloud resolver entirely.
+        // The embedUrl IS the m3u8 regardless of whether the path contains ".m3u8",
+        // since CDN providers (moo, bonk, bee, etc.) use extension-less signed URLs.
+        if (source === 'miruro') {
+            const m3u8Url = embedResult.embedUrl;
+            return res.json({
+                anilistId: siteIds.anilistId,
+                malId: siteIds.malId,
+                title: siteIds.title,
+                episode: epNum,
+                type,
+                source,
+                server: usedServer,
+                availableServers: filtered.map((s) => s.name),
+                embedUrl: m3u8Url,
+                m3u8: m3u8Url,
+                hlsProxyUrl: proxiedHlsUrl(req, m3u8Url, embedResult.referer ?? 'https://www.miruro.tv/'),
+                playbackMode: 'hls',
+                iframeOnly: false,
+                subtitles: [],
+                intro: null,
+                outro: null,
+                note: null,
+            });
+        }
         const directM3u8 = typeof embedResult.embedUrl === 'string' && embedResult.embedUrl.includes('.m3u8');
         const stream = directM3u8 ? null : await (0, megacloud_1.resolveEmbed)(embedResult.embedUrl);
         const hasHls = Boolean(directM3u8 || stream?.m3u8);
@@ -309,7 +365,7 @@ async function watchHandler(req, res) {
             availableServers: filtered.map((s) => s.name),
             embedUrl: embedResult.embedUrl,
             m3u8: directM3u8 ? embedResult.embedUrl : stream?.m3u8 ?? null,
-            hlsProxyUrl: directM3u8 ? proxiedHlsUrl(req, embedResult.embedUrl, embedResult.referer) : null,
+            hlsProxyUrl: directM3u8 ? proxiedHlsUrl(req, embedResult.embedUrl, embedResult.referer) : (stream?.m3u8 ? proxiedHlsUrl(req, stream.m3u8, embedResult.referer) : null),
             playbackMode: hasHls ? 'hls' : 'iframe',
             iframeOnly: !hasHls,
             subtitles: stream?.subtitles ?? [],
@@ -347,8 +403,9 @@ router.get('/proxy/hls', async (req, res) => {
             responseType: 'arraybuffer',
             timeout: 15000,
             headers: {
-                'User-Agent': 'Mozilla/5.0',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
                 'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
                 'Referer': referer,
                 'Origin': origin,
             },
@@ -423,6 +480,88 @@ router.get('/watch', async (req, res) => {
     if (server)
         req.query.server = server;
     return watchHandler(req, res);
+});
+// ── DEBUG: dump raw miruro pipe sources (remove before production) ──────────
+router.get('/debug/miruro-sources', async (req, res) => {
+    const { anilistId, provider, category, episodeId } = req.query;
+    if (!anilistId || !provider || !category || !episodeId) {
+        return res.status(400).json({ error: 'Required: anilistId, provider, category, episodeId' });
+    }
+    try {
+        const { getMiruroEmbedUrl } = await Promise.resolve().then(() => __importStar(require('./scrapers/miruro')));
+        // sourceId format: anilistId::provider::category::episodeId
+        const sourceId = `${anilistId}::${provider}::${category}::${episodeId}`;
+        // Call fetchSources directly by re-implementing inline here for debug visibility
+        const axios2 = (await Promise.resolve().then(() => __importStar(require('axios')))).default;
+        const { Buffer: Buf } = await Promise.resolve().then(() => __importStar(require('buffer')));
+        const zlib2 = await Promise.resolve().then(() => __importStar(require('zlib')));
+        const PIPE_URL = 'https://www.miruro.tv/api/secure/pipe';
+        const H = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+            'Referer': 'https://www.miruro.tv/',
+            'Origin': 'https://www.miruro.tv',
+        };
+        const encId = Buf.from(episodeId).toString('base64url');
+        const payload = { path: 'sources', method: 'GET', query: { episodeId: encId, provider, category, anilistId: parseInt(anilistId) }, body: null, version: '0.1.0' };
+        const encodedReq = Buf.from(JSON.stringify(payload)).toString('base64url');
+        const r = await axios2.get(`${PIPE_URL}?e=${encodedReq}`, { headers: H, timeout: 15000, responseType: 'text', transformResponse: (d) => d });
+        const padded = r.data + '='.repeat((4 - (r.data.length % 4)) % 4);
+        const raw = JSON.parse(zlib2.gunzipSync(Buf.from(padded, 'base64url')).toString('utf-8'));
+        return res.json({ sourceId, raw });
+    }
+    catch (e) {
+        return res.status(500).json({ error: String(e?.message || e), stack: String(e?.stack || '') });
+    }
+});
+// ── DEBUG: inspect raw miruro pipe sources for a provider ──────────────────
+// GET /api/debug/miruro?anilistId=21&provider=bonk&ep=1&category=sub
+router.get('/debug/miruro', async (req, res) => {
+    try {
+        const anilistId = parseInt(req.query.anilistId);
+        const provider = req.query.provider || 'bonk';
+        const epNum = parseInt(req.query.ep || '1');
+        const category = (req.query.category || 'sub');
+        if (isNaN(anilistId))
+            return res.status(400).json({ error: 'anilistId required' });
+        const servers = await (0, miruro_1.getMiruroServers)(`${anilistId}:${epNum}`);
+        const match = servers.find(s => s.name === `${provider}-${category}`);
+        if (!match)
+            return res.json({ error: 'server not found', available: servers.map(s => s.name) });
+        // Pull the raw episode ID out of the sourceId
+        const parts = match.sourceId.split('::');
+        const rawEpisodeId = parts.slice(3).join('::');
+        // Re-encode and call the pipe directly (same as fetchSources does internally)
+        const { Buffer } = await Promise.resolve().then(() => __importStar(require('buffer')));
+        const zlib = await Promise.resolve().then(() => __importStar(require('zlib')));
+        const encId = Buffer.from(rawEpisodeId).toString('base64url');
+        const payload = { path: 'sources', method: 'GET', query: { episodeId: encId, provider, category, anilistId }, body: null, version: '0.1.0' };
+        const encodedReq = Buffer.from(JSON.stringify(payload)).toString('base64url');
+        const pipeRes = await axios_1.default.get(`https://www.miruro.tv/api/secure/pipe?e=${encodedReq}`, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+                'Referer': 'https://www.miruro.tv/',
+            },
+            timeout: 15000,
+            responseType: 'text',
+            transformResponse: (d) => d,
+        });
+        const padded = pipeRes.data + '='.repeat((4 - (pipeRes.data.length % 4)) % 4);
+        const compressed = Buffer.from(padded, 'base64url');
+        const decompressed = zlib.gunzipSync(compressed);
+        const raw = JSON.parse(decompressed.toString('utf-8'));
+        return res.json({
+            sourceId: match.sourceId,
+            rawEpisodeId,
+            pipeTopLevelKeys: Object.keys(raw),
+            streams: raw.streams ?? null,
+            headers: raw.headers ?? null,
+            intro: raw.intro ?? null,
+            raw,
+        });
+    }
+    catch (e) {
+        return res.status(500).json({ error: String(e?.message || e), stack: e?.stack });
+    }
 });
 router.get('/health', (_req, res) => {
     res.json({ status: 'ok', version: '1.0.1-miruro-debug', sources: SOURCES, uptime: Math.floor(process.uptime()), cache: (0, cache_1.cacheStats)(), timestamp: new Date().toISOString() });

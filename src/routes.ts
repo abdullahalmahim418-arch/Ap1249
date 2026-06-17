@@ -213,9 +213,8 @@ async function watchHandler(req: Request, res: Response) {
     if (source === 'animeheaven') allServers = await getHeavenServers(episode.id);
     if (source === 'miruro') allServers = await getMiruroServers(episode.id);
 
-    let filtered = allServers.filter((s: any) => s.type === type);
-    if (!filtered.length) filtered = allServers.filter((s: any) => s.type === 'sub');
-    if (!filtered.length) return res.status(404).json({ error: `No servers found for ep ${epNum}` });
+    const filtered = allServers.filter((s: any) => s.type === type);
+    if (!filtered.length) return res.status(404).json({ error: `No ${type} stream available on ${source} for ep ${epNum}` });
 
     if (preferredServer) {
       filtered.sort((a: any, b: any) => {
