@@ -23,6 +23,7 @@ export interface EmbedResult {
   embedUrl: string;
   serverName: string;
   type: string;
+  referer?: string;
 }
 
 // Legacy search kept for compatibility with callers that import it directly.
@@ -123,6 +124,12 @@ export async function getEmbedUrl(sourceId: string): Promise<EmbedResult | null>
       embedUrl: sourceId,
       serverName: 'Senshi',
       type: sourceId.includes('.m3u8') ? 'hls' : 'iframe',
+      // ninstream.com and similar CDNs reject requests with no Referer
+      // (403), since the stream is only meant to be loaded from Senshi's
+      // own player page. Sending Senshi's own origin here satisfies that
+      // check; this previously was never set, so the proxy sent no
+      // Referer at all and got 403'd.
+      referer: BASE + '/',
     };
   }
 
@@ -138,11 +145,12 @@ export async function getEmbedUrl(sourceId: string): Promise<EmbedResult | null>
         embedUrl: data.link,
         serverName: data.server ?? 'unknown',
         type: data.type ?? 'iframe',
+        referer: BASE + '/',
       };
     }
 
     if (data?.url) {
-      return { embedUrl: data.url, serverName: 'server', type: 'iframe' };
+      return { embedUrl: data.url, serverName: 'server', type: 'iframe', referer: BASE + '/' };
     }
 
     return null;
