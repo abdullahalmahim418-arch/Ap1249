@@ -262,9 +262,12 @@ async function watchHandler(req: Request, res: Response) {
       });
     }
 
-    // Miruro streams are always direct HLS — skip megacloud resolver entirely.
-    // The embedUrl IS the m3u8 regardless of whether the path contains ".m3u8",
-    // since CDN providers (moo, bonk, bee, etc.) use extension-less signed URLs.
+    // Miruro streams are usually direct HLS — the embedUrl IS the m3u8
+    // regardless of whether the path contains ".m3u8", since CDN providers
+    // (moo, bonk, bee, etc.) use extension-less signed URLs. But some
+    // providers mix embed-page links into the same streams list with no hls
+    // entry at all; getMiruroEmbedUrl now reports which kind it actually
+    // picked via embedResult.type, so branch on that instead of assuming.
     //
     // IMPORTANT: do not fall back to a fixed "https://www.miruro.tv/" referer
     // here. Each provider's CDN (bonk/kiwi/bee/moo/...) is a separate edge host
@@ -275,7 +278,8 @@ async function watchHandler(req: Request, res: Response) {
     // legitimately found none, we pass undefined through and let the proxy
     // omit the header rather than send a guaranteed-wrong one.
     if (source === 'miruro') {
-      const m3u8Url = embedResult.embedUrl as string;
+      const isHls = embedResult.type === 'hls';
+      const url = embedResult.embedUrl as string;
       return res.json({
         anilistId: siteIds.anilistId,
         malId: siteIds.malId,
@@ -285,15 +289,15 @@ async function watchHandler(req: Request, res: Response) {
         source,
         server: usedServer,
         availableServers: filtered.map((s: any) => s.name),
-        embedUrl: m3u8Url,
-        m3u8: m3u8Url,
-        hlsProxyUrl: proxiedHlsUrl(req, m3u8Url, embedResult.referer),
-        playbackMode: 'hls',
-        iframeOnly: false,
+        embedUrl: url,
+        m3u8: isHls ? url : null,
+        hlsProxyUrl: isHls ? proxiedHlsUrl(req, url, embedResult.referer) : null,
+        playbackMode: isHls ? 'hls' : 'iframe',
+        iframeOnly: !isHls,
         subtitles: [],
         intro: null,
         outro: null,
-        note: null,
+        note: isHls ? null : 'This provider returned no HLS stream for this episode/category — use embedUrl in an iframe.',
       });
     }
 
