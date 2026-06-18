@@ -265,6 +265,15 @@ async function watchHandler(req: Request, res: Response) {
     // Miruro streams are always direct HLS — skip megacloud resolver entirely.
     // The embedUrl IS the m3u8 regardless of whether the path contains ".m3u8",
     // since CDN providers (moo, bonk, bee, etc.) use extension-less signed URLs.
+    //
+    // IMPORTANT: do not fall back to a fixed "https://www.miruro.tv/" referer
+    // here. Each provider's CDN (bonk/kiwi/bee/moo/...) is a separate edge host
+    // that enforces its own Referer/Origin check; sending miruro.tv to a CDN
+    // that doesn't expect it gets the request 403'd, which is why most sources
+    // were resolving fine but failing to actually play. getMiruroEmbedUrl now
+    // resolves the correct provider-specific referer when one exists; if it
+    // legitimately found none, we pass undefined through and let the proxy
+    // omit the header rather than send a guaranteed-wrong one.
     if (source === 'miruro') {
       const m3u8Url = embedResult.embedUrl as string;
       return res.json({
@@ -278,7 +287,7 @@ async function watchHandler(req: Request, res: Response) {
         availableServers: filtered.map((s: any) => s.name),
         embedUrl: m3u8Url,
         m3u8: m3u8Url,
-        hlsProxyUrl: proxiedHlsUrl(req, m3u8Url, embedResult.referer ?? 'https://www.miruro.tv/'),
+        hlsProxyUrl: proxiedHlsUrl(req, m3u8Url, embedResult.referer),
         playbackMode: 'hls',
         iframeOnly: false,
         subtitles: [],
@@ -324,14 +333,20 @@ router.get('/proxy/hls', async (req: Request, res: Response) => {
   if (!url) return res.status(400).json({ error: 'Missing ?url=' });
   if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: '?url must be absolute http(s)' });
 
-  let referer = 'https://senshi.live/';
-  let origin = 'https://senshi.live';
+  // Only senshi/dao/wave/animeheaven embeds are actually tied to senshi.live;
+  // defaulting to it unconditionally meant any source whose embedResult had no
+  // referer (most miruro providers) silently got sent to upstream CDNs with
+  // the wrong Referer/Origin and got rejected — sources resolved but never
+  // played. If no ref was supplied, omit the headers entirely instead of
+  // guessing; most CDNs tolerate a missing Referer far better than a wrong one.
+  let referer: string | undefined;
+  let origin: string | undefined;
   if (ref && /^https?:\/\//i.test(ref)) {
     referer = ref;
     try {
       origin = new URL(ref).origin;
     } catch {
-      // keep default origin if ref is malformed
+      origin = undefined;
     }
   }
 
@@ -343,8 +358,8 @@ router.get('/proxy/hls', async (req: Request, res: Response) => {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
         'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': referer,
-        'Origin': origin,
+        ...(referer ? { Referer: referer } : {}),
+        ...(origin ? { Origin: origin } : {}),
       },
     });
 
