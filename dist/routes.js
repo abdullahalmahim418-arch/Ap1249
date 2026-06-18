@@ -342,7 +342,7 @@ async function watchHandler(req, res) {
                 availableServers: filtered.map((s) => s.name),
                 embedUrl: m3u8Url,
                 m3u8: m3u8Url,
-                hlsProxyUrl: proxiedHlsUrl(req, m3u8Url, embedResult.referer ?? 'https://www.miruro.tv/'),
+                hlsProxyUrl: proxiedHlsUrl(req, m3u8Url, embedResult.referer),
                 playbackMode: 'hls',
                 iframeOnly: false,
                 subtitles: [],
@@ -387,15 +387,15 @@ router.get('/proxy/hls', async (req, res) => {
         return res.status(400).json({ error: 'Missing ?url=' });
     if (!/^https?:\/\//i.test(url))
         return res.status(400).json({ error: '?url must be absolute http(s)' });
-    let referer = 'https://senshi.live/';
-    let origin = 'https://senshi.live';
+    let referer;
+    let origin;
     if (ref && /^https?:\/\//i.test(ref)) {
         referer = ref;
         try {
             origin = new URL(ref).origin;
         }
         catch {
-            // keep default origin if ref is malformed
+            origin = undefined;
         }
     }
     try {
@@ -406,8 +406,8 @@ router.get('/proxy/hls', async (req, res) => {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
                 'Accept': '*/*',
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': referer,
-                'Origin': origin,
+                ...(referer ? { Referer: referer } : {}),
+                ...(origin ? { Origin: origin } : {}),
             },
         });
         const contentType = String(upstream.headers['content-type'] ?? '');
