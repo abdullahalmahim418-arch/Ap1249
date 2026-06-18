@@ -126,12 +126,16 @@ export async function resolveVidstreaming(embedUrl: string): Promise<StreamResul
 
 // Generic resolver — detects which resolver to use based on URL
 export async function resolveEmbed(embedUrl: string): Promise<StreamResult | null> {
-  if (embedUrl.includes('megacloud') || embedUrl.includes('e-1')) {
-    return resolveMegacloud(embedUrl);
-  }
   if (embedUrl.includes('vidstreaming') || embedUrl.includes('gogoplay')) {
     return resolveVidstreaming(embedUrl);
   }
-  // Unknown embed — return null so caller can iframe it
-  return null;
+  // Megacloud mirror domains rotate constantly (vidwish.live, rapid-cloud.co,
+  // mcloud.to, etc.) without "megacloud" or "e-1" appearing anywhere in the
+  // URL, even though they expose the same /embed-2/ajax/e-1/getSources API.
+  // Previously this branch only fired on an exact substring match, so any
+  // rotated domain fell through to `return null` and got mislabeled upstream
+  // as "key may have rotated" even though resolution was never attempted.
+  // Try Megacloud-style resolution for anything else; resolveMegacloud already
+  // fails safe (returns null) if the host doesn't actually expose that API.
+  return resolveMegacloud(embedUrl);
 }
