@@ -53,6 +53,8 @@ interface PipeData {
   providers?: Record<string, PipeProviderData>;
   malId?: number;
   kitsuId?: number;
+  headers?: Record<string, string>;
+  streams?: any[];
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -236,7 +238,24 @@ export async function getMiruroEmbedUrl(sourceId: string): Promise<MiruroEmbedRe
     const best = sorted[0];
     if (!best) return null;
 
-    const referer = typeof best.referer === 'string' && best.referer ? best.referer : undefined;
+    // The Referer/Origin a CDN expects is provider-specific, NOT miruro.tv —
+    // bonk/kiwi/bee/moo/etc. are separate edge hosts that 403 a request carrying
+    // the wrong Referer (this was the root cause of "source returned but won't
+    // play": every embed without a per-stream referer was silently defaulting
+    // to miruro.tv downstream, which most CDNs reject). Resolution order:
+    //   1. a referer on the stream itself
+    //   2. provider-level headers the pipe returns alongside `streams`
+    //   3. undefined — leave it unset rather than guess a domain that's wrong
+    //      for this provider; many CDNs are fine with no Referer at all, but
+    //      none are fine with the *wrong* one.
+    const headerReferer =
+      data?.headers?.Referer ?? data?.headers?.referer ?? data?.headers?.Origin ?? data?.headers?.origin;
+
+    const referer =
+      (typeof best.referer === 'string' && best.referer) ||
+      (typeof headerReferer === 'string' && headerReferer) ||
+      undefined;
+
     return {
       embedUrl: best.url,
       serverName: provider,
