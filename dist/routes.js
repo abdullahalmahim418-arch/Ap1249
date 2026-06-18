@@ -326,14 +326,11 @@ async function watchHandler(req, res) {
                 note: 'AnimeHeaven currently exposes direct MP4 sources, not m3u8/HLS.',
             });
         }
-        // Miruro streams are usually direct HLS — the embedUrl IS the m3u8
-        // regardless of whether the path contains ".m3u8". But some providers
-        // mix embed-page links into the streams list with no hls entry at
-        // all; getMiruroEmbedUrl reports which kind it picked via
-        // embedResult.type, so branch on that instead of assuming.
+        // Miruro streams are always direct HLS — skip megacloud resolver entirely.
+        // The embedUrl IS the m3u8 regardless of whether the path contains ".m3u8",
+        // since CDN providers (moo, bonk, bee, etc.) use extension-less signed URLs.
         if (source === 'miruro') {
-            const isHls = embedResult.type === 'hls';
-            const url = embedResult.embedUrl;
+            const m3u8Url = embedResult.embedUrl;
             return res.json({
                 anilistId: siteIds.anilistId,
                 malId: siteIds.malId,
@@ -343,15 +340,15 @@ async function watchHandler(req, res) {
                 source,
                 server: usedServer,
                 availableServers: filtered.map((s) => s.name),
-                embedUrl: url,
-                m3u8: isHls ? url : null,
-                hlsProxyUrl: isHls ? proxiedHlsUrl(req, url, embedResult.referer) : null,
-                playbackMode: isHls ? 'hls' : 'iframe',
-                iframeOnly: !isHls,
+                embedUrl: m3u8Url,
+                m3u8: m3u8Url,
+                hlsProxyUrl: proxiedHlsUrl(req, m3u8Url, embedResult.referer),
+                playbackMode: 'hls',
+                iframeOnly: false,
                 subtitles: [],
                 intro: null,
                 outro: null,
-                note: isHls ? null : 'This provider returned no HLS stream for this episode/category — use embedUrl in an iframe.',
+                note: null,
             });
         }
         const directM3u8 = typeof embedResult.embedUrl === 'string' && embedResult.embedUrl.includes('.m3u8');
