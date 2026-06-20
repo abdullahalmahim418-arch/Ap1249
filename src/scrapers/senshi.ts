@@ -87,6 +87,32 @@ function resolveEmbedType(embed: any): 'sub' | 'dub' | 'raw' {
   return 'sub';
 }
 
+/**
+ * Derive the correct Referer for a stream URL.
+ *
+ * CDN providers (ninstream, etc.) enforce Referer checks. Sub streams are
+ * served via Senshi's own player so senshi.live works fine as Referer.
+ * Dub streams often come from a *different* CDN that expects its own origin
+ * as Referer — sending senshi.live to that CDN gets a 403.
+ *
+ * Strategy:
+ *  1. If the stream URL is on senshi.live itself → use senshi.live as Referer.
+ *  2. Otherwise derive the Referer from the stream URL's own origin.
+ *     Most CDNs only validate that Referer matches their own domain, so
+ *     sending `https://cdn.example.com/` satisfies the check.
+ */
+function deriveReferer(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.endsWith('senshi.live') || parsed.hostname === 'senshi.live') {
+      return BASE + '/';
+    }
+    return parsed.origin + '/';
+  } catch {
+    return BASE + '/';
+  }
+}
+
 export async function getServers(episodeId: string): Promise<SenshiServer[]> {
   if (episodeId.includes(':')) {
     const [animeId, epNum] = episodeId.split(':');
@@ -143,12 +169,11 @@ export async function getEmbedUrl(sourceId: string): Promise<EmbedResult | null>
       embedUrl: sourceId,
       serverName: 'Senshi',
       type: sourceId.includes('.m3u8') ? 'hls' : 'iframe',
-      // ninstream.com and similar CDNs reject requests with no Referer
-      // (403), since the stream is only meant to be loaded from Senshi's
-      // own player page. Sending Senshi's own origin here satisfies that
-      // check; this previously was never set, so the proxy sent no
-      // Referer at all and got 403'd.
-      referer: BASE + '/',
+      // Derive the correct Referer from the stream URL's own origin.
+      // Previously this was hardcoded to senshi.live, which caused 403s on
+      // dub streams served from third-party CDNs that enforce their own
+      // Referer policy and reject requests coming from a different origin.
+      referer: deriveReferer(sourceId),
     };
   }
 
@@ -164,12 +189,17 @@ export async function getEmbedUrl(sourceId: string): Promise<EmbedResult | null>
         embedUrl: data.link,
         serverName: data.server ?? 'unknown',
         type: data.type ?? 'iframe',
-        referer: BASE + '/',
+        referer: deriveReferer(data.link),
       };
     }
 
     if (data?.url) {
-      return { embedUrl: data.url, serverName: 'server', type: 'iframe', referer: BASE + '/' };
+      return {
+        embedUrl: data.url,
+        serverName: 'server',
+        type: 'iframe',
+        referer: deriveReferer(data.url),
+      };
     }
 
     return null;
