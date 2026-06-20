@@ -372,13 +372,31 @@ router.get('/proxy/hls', async (req: Request, res: Response) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Cache-Control', 'public, max-age=30');
 
-    if (url.includes('.m3u8') || contentType.includes('mpegurl')) {
-      const text = body.toString('utf8');
-      if (!text.trim().startsWith('#EXTM3U')) {
+    // Detect HLS playlists by content-type, URL extension, OR body content.
+    // Many CDNs serve m3u8 at tokenized URLs with no .m3u8 extension and
+    // return generic content-types like application/octet-stream — so we must
+    // also sniff the body. Without this, sub-playlists and extension-less
+    // master playlists fall through to the raw bytes branch, HLS.js receives
+    // non-playlist data, and the video renders blank with no error.
+    const text = body.toString('utf8');
+    const isPlaylist =
+      url.includes('.m3u8') ||
+      contentType.includes('mpegurl') ||
+      text.trimStart().startsWith('#EXTM3U');
+
+    if (isPlaylist) {
+      if (!text.trimStart().startsWith('#EXTM3U')) {
         return res.status(502).json({ error: 'Upstream did not return a valid m3u8 playlist', body: text.slice(0, 300) });
       }
+      // For sub-playlists (variant streams), derive the referer from the
+      // sub-playlist URL itself rather than blindly forwarding the top-level
+      // ref. This way segment requests carry the right CDN origin as Referer
+      // regardless of how many playlist levels deep we are.
+      const segRef = (() => {
+        try { return new URL(url).origin + '/'; } catch { return ref; }
+      })();
       res.type('application/vnd.apple.mpegurl');
-      return res.send(rewriteHlsPlaylist(req, text, url, ref));
+      return res.send(rewriteHlsPlaylist(req, text, url, segRef));
     }
 
     res.type(contentType || 'application/octet-stream');
