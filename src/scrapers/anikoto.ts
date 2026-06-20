@@ -1,0 +1,522 @@
+import * as cheerio from 'cheerio';
+import axios from 'axios';
+import { makeClient, makeAjaxClient } from '../utils/fetch';
+import { cacheGet, cacheSet } from '../utils/cache';
+
+// ══════════════════════════════════════════════════════════════
+// ANIKOTO.NET — HiAnime/Zoro-style clone
+//   /watch/{slug}              → episode list page
+//   /ajax/episode/list/{id}    → episode list fragment (AJAX fallback)
+//   /ajax/server/list?servers= → server list fragment
+//   /ajax/server?get=&sv=      → resolves a server to its embed URL
+//   + a "Kiwi Mapper" side-channel keyed by MAL id, independent of the
+//     regular server list, that points at a CDN not behind bot-protection.
+// ══════════════════════════════════════════════════════════════
+
+const BASE = 'https://anikoto.net';
+const http = makeClient(BASE, BASE + '/');
+const ajax = makeAjaxClient(BASE, BASE + '/');
+
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+const KIWI_MAPPER_URLS = [
+  'https://mapper.nekostream.site/api/mal',
+  'https://mapper.mewcdn.online/api/mal',
+];
+
+export interface AnikotoEpisode {
+  num: number;
+  id: string;
+  title: string;
+}
+
+export interface AnikotoServer {
+  name: string;
+  sourceId: string;
+  type: 'sub' | 'dub' | 'raw';
+}
+
+export interface AnikotoSubtitle {
+  lang: string;
+  url: string;
+  default?: boolean;
+}
+
+export interface AnikotoStream {
+  embedUrl: string;
+  m3u8: string | null;
+  referer?: string;
+  subtitles: AnikotoSubtitle[];
+  serverName: string;
+  type: 'hls' | 'iframe';
+}
+
+// ══════════════════════════════════════════════════════════════
+// SEARCH / SLUG RESOLUTION (no AniList mapping exists for anikoto,
+// so — same approach as AnimeHeaven — we search by title and score
+// the closest match).
+// ══════════════════════════════════════════════════════════════
+
+interface AnikotoSearchResult {
+  slug: string;
+  title: string;
+}
+
+function normalizeTitle(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function scoreTitle(query: string, title: string): number {
+  const needle = normalizeTitle(query);
+  const hay = normalizeTitle(title);
+  if (!needle || !hay) return 0;
+  if (hay === needle) return 100;
+  if (hay.startsWith(needle) || needle.startsWith(hay)) return 80;
+  if (hay.includes(needle) || needle.includes(hay)) return 60;
+  let matches = 0;
+  for (const ch of needle) if (hay.includes(ch)) matches++;
+  return Math.floor((matches / Math.max(needle.length, 1)) * 40);
+}
+
+export async function searchAnikoto(query: string): Promise<AnikotoSearchResult[]> {
+  const cacheKey = `anikoto:search:${query.toLowerCase().trim()}`;
+  const cached = cacheGet<AnikotoSearchResult[]>(cacheKey);
+  if (cached) return cached;
+
+  const res = await http.get('/filter', { params: { keyword: query } });
+  const $ = cheerio.load(res.data);
+  const results: AnikotoSearchResult[] = [];
+
+  $('.items.flw-wrap .film_list-wrap .flw-item, .film_list-wrap .flw-item, .ani.items .item, section .items .item').each(
+    (_, el) => {
+      const $el = $(el);
+      const href = $el.attr('href') ?? $el.find('a').first().attr('href') ?? '';
+      const slug = href
+        .replace(/^https?:\/\/[^/]+/, '')
+        .replace(/^\/watch\//, '')
+        .replace(/\/ep-\d+$/, '')
+        .replace(/\/$/, '');
+      const title = $el.find('.name, .d-title').first().text().trim();
+      if (!slug || !title) return;
+      results.push({ slug, title });
+    }
+  );
+
+  cacheSet(cacheKey, results, 'episodes');
+  return results;
+}
+
+export async function findAnikotoSlug(title: string): Promise<string | null> {
+  const noPossessive = title.replace(/[’']s\b/gi, '');
+  const variants = Array.from(
+    new Set(
+      [
+        title,
+        noPossessive,
+        title.replace(/[’']/g, ''),
+        noPossessive.replace(/[+]/g, ' '),
+        title.replace(/[+]/g, ' '),
+        title.split(/[:(|-]/)[0]?.trim(),
+        noPossessive.split(/[:(|-]/)[0]?.trim(),
+        title.replace(/[’']/g, '').split(/\s+/).slice(0, 2).join(' '),
+        noPossessive.split(/\s+/).slice(0, 2).join(' '),
+        title.replace(/[’']/g, '').split(/\s+/)[0],
+        noPossessive.split(/\s+/)[0],
+      ].filter((value): value is string => Boolean(value && value.trim().length >= 3))
+    )
+  );
+
+  const allResults: AnikotoSearchResult[] = [];
+  for (const variant of variants) {
+    const results = await searchAnikoto(variant).catch(() => []);
+    allResults.push(...results);
+    if (results.some((result) => scoreTitle(title, result.title) >= 80)) break;
+  }
+
+  const unique = Array.from(new Map(allResults.map((result) => [result.slug, result])).values());
+  if (!unique.length) return null;
+  return unique.map((result) => ({ result, score: scoreTitle(title, result.title) })).sort((a, b) => b.score - a.score)[0]
+    .result.slug;
+}
+
+// ══════════════════════════════════════════════════════════════
+// EPISODE LIST
+// ══════════════════════════════════════════════════════════════
+
+interface RawEpisode {
+  num: number;
+  title: string;
+  dataIds?: string;
+  dataMal?: string;
+  dataTimestamp?: string;
+}
+
+async function fetchRawEpisodes(slug: string): Promise<RawEpisode[]> {
+  const cacheKey = `anikoto:eps:${slug}`;
+  const cached = cacheGet<RawEpisode[]>(cacheKey);
+  if (cached) return cached;
+
+  const res = await http.get(`/watch/${slug}`);
+  const $ = cheerio.load(res.data);
+  const animeId = $('#watch-main').attr('data-id') ?? '';
+
+  // If episodes aren't inlined in the page, the site lazy-loads them via AJAX
+  if (animeId && $('#w-episodes a').length === 0) {
+    try {
+      const data = await ajax.get(`/ajax/episode/list/${animeId}`);
+      const result = data.data?.result;
+      if (result) {
+        const ajaxDoc = cheerio.load(result);
+        $('#w-episodes').html(ajaxDoc.root().html() || '');
+      }
+    } catch {
+      // fall through with whatever (possibly empty) the page already had
+    }
+  }
+
+  const episodes: RawEpisode[] = [];
+  $('#w-episodes ul.ep-range li a, #w-episodes a[href], #w-episodes a[data-num]').each((_, el) => {
+    const $el = $(el);
+    const href = $el.attr('href') ?? '';
+    if (!href.includes('/watch/') && !$el.attr('data-num')) return;
+
+    const epNumRaw =
+      $el.attr('data-num') || $el.find('.number, .d-title, span').first().text().trim() || href.split('/ep-')[1] || '';
+    const num = parseFloat(epNumRaw);
+    if (!Number.isFinite(num)) return;
+
+    episodes.push({
+      num,
+      title: $el.attr('title')?.trim() || `Episode ${epNumRaw}`,
+      dataIds: $el.attr('data-ids') ?? $el.attr('data-id') ?? undefined,
+      dataMal: $el.attr('data-mal') ?? undefined,
+      dataTimestamp: $el.attr('data-timestamp') ?? undefined,
+    });
+  });
+
+  const unique = Array.from(new Map(episodes.map((ep) => [ep.num, ep])).values()).sort((a, b) => a.num - b.num);
+  if (unique.length > 0) cacheSet(cacheKey, unique, 'episodes');
+  return unique;
+}
+
+export async function getAnikotoEpisodes(slug: string): Promise<AnikotoEpisode[]> {
+  const raw = await fetchRawEpisodes(slug);
+  return raw.map((ep) => ({
+    num: ep.num,
+    // sourceId for getAnikotoServers() — carries everything needed to fetch
+    // the server list (data-ids) and the Kiwi side-channel (data-mal + data-timestamp)
+    // without a second page fetch.
+    id: `${slug}::${ep.num}::${ep.dataIds ?? ''}::${ep.dataMal ?? ''}::${ep.dataTimestamp ?? ''}`,
+    title: ep.title,
+  }));
+}
+
+// ══════════════════════════════════════════════════════════════
+// SERVER LIST
+// ══════════════════════════════════════════════════════════════
+
+export async function getAnikotoServers(episodeId: string): Promise<AnikotoServer[]> {
+  const [slug, epNumStr, dataIds, dataMal, dataTimestamp] = episodeId.split('::');
+  if (!slug || !epNumStr) return [];
+
+  const servers: AnikotoServer[] = [];
+
+  if (dataIds) {
+    try {
+      const res = await ajax.get('/ajax/server/list', { params: { servers: dataIds } });
+      const html = res.data?.result || (typeof res.data === 'string' ? res.data : '');
+      const $ = cheerio.load(html);
+
+      $('.server, li').each((_, el) => {
+        const $el = $(el);
+        const linkId = $el.attr('data-link-id');
+        if (!linkId) return;
+
+        const typeLabel = $el.closest('.type').find('label, .name').text().trim().toLowerCase();
+        const name = $el.text().trim() || 'Server';
+        const svId = $el.attr('data-sv-id') || '';
+        const type: AnikotoServer['type'] =
+          typeLabel.includes('dub') ? 'dub' : typeLabel.includes('raw') ? 'raw' : 'sub';
+
+        servers.push({
+          name,
+          sourceId: `${slug}::${epNumStr}::reg::${linkId}::${svId}`,
+          type,
+        });
+      });
+    } catch {
+      // server list fetch failed — Kiwi (below) may still work
+    }
+  }
+
+  // Kiwi Mapper side-channel — independent CDN, requires MAL id + timestamp
+  if (dataMal && dataTimestamp) {
+    for (const type of ['sub', 'dub'] as const) {
+      servers.push({
+        name: `Kiwi Stream (${type})`,
+        sourceId: `kiwi::${dataMal}::${epNumStr}::${dataTimestamp}::${type}`,
+        type,
+      });
+    }
+  }
+
+  return servers;
+}
+
+// ══════════════════════════════════════════════════════════════
+// EMBED / STREAM RESOLUTION
+// ══════════════════════════════════════════════════════════════
+
+async function parseM3u8Subtitles(m3u8Url: string, referer: string): Promise<AnikotoSubtitle[]> {
+  try {
+    const { data } = await axios.get<string>(m3u8Url, {
+      headers: { 'User-Agent': UA, Referer: referer },
+      timeout: 5000,
+    });
+    const tracks: AnikotoSubtitle[] = [];
+    for (const line of data.split('\n')) {
+      if (!line.startsWith('#EXT-X-MEDIA') || !line.includes('TYPE=SUBTITLES')) continue;
+      const uri = line.match(/URI="([^"]+)"/)?.[1];
+      if (!uri) continue;
+      const label = line.match(/NAME="([^"]+)"/)?.[1];
+      const isDefault = /DEFAULT=YES/i.test(line);
+      const fullUri = uri.startsWith('http') ? uri : new URL(uri, m3u8Url).toString();
+      tracks.push({ url: fullUri, lang: label || 'Unknown', default: isDefault });
+    }
+    return tracks;
+  } catch {
+    return [];
+  }
+}
+
+// ── Kiwi Mapper ──────────────────────────────────────────────
+async function resolveKiwi(malId: string, epNum: string, timestamp: string, type: 'sub' | 'dub'): Promise<AnikotoStream | null> {
+  for (const mapperBase of KIWI_MAPPER_URLS) {
+    try {
+      const mapperUrl = `${mapperBase}/${encodeURIComponent(malId)}/${encodeURIComponent(epNum)}/${encodeURIComponent(timestamp)}`;
+      const { data } = await axios.get(mapperUrl, {
+        headers: { 'User-Agent': UA, Referer: BASE + '/', Origin: BASE },
+        timeout: 8000,
+      });
+      if (!data || typeof data !== 'object') continue;
+
+      let serverCode: string | null = null;
+      for (const key of Object.keys(data)) {
+        if (key === 'status') continue;
+        const entry = data[key]?.[type];
+        if (entry?.url && typeof entry.url === 'string') {
+          serverCode = entry.url;
+          break;
+        }
+      }
+      if (!serverCode) continue;
+
+      const serverRes = await ajax.get('/ajax/server', { params: { get: serverCode } });
+      let embedUrl: string | null = serverRes.data?.result?.url ?? null;
+      if (!embedUrl) continue;
+
+      if (embedUrl.includes('#')) {
+        try {
+          embedUrl = Buffer.from(embedUrl.split('#')[1], 'base64').toString('utf-8');
+        } catch {
+          // leave embedUrl as-is
+        }
+      }
+
+      const referer = 'https://kwik.cx2.mewcdn.online/';
+      const subtitles = await parseM3u8Subtitles(embedUrl, referer);
+      return { embedUrl, m3u8: embedUrl, referer, subtitles, serverName: 'Kiwi Stream', type: 'hls' };
+    } catch {
+      // try the next mapper mirror
+    }
+  }
+  return null;
+}
+
+// ── Megacloud (anikoto's current embed host: megacloud.blog) ───
+let _megacloudKeysCache: Record<string, string> | null = null;
+let _megacloudKeysCacheAt = 0;
+const MEGACLOUD_KEYS_TTL_MS = 15 * 60 * 1000;
+
+async function getMegacloudKeys(): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (_megacloudKeysCache && now - _megacloudKeysCacheAt < MEGACLOUD_KEYS_TTL_MS) return _megacloudKeysCache;
+  const { data } = await axios.get<Record<string, string>>(
+    'https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json',
+    { timeout: 5000 }
+  );
+  _megacloudKeysCache = data;
+  _megacloudKeysCacheAt = now;
+  return data;
+}
+
+async function doMegacloud(embedUrl: string, html: string, referer: string, serverName: string): Promise<AnikotoStream | null> {
+  const origin = new URL(embedUrl).origin;
+
+  const match1 = html.match(/\b[a-zA-Z0-9]{48}\b/);
+  const match2 = html.match(/\b([a-zA-Z0-9]{16})\b.*?\b([a-zA-Z0-9]{16})\b.*?\b([a-zA-Z0-9]{16})\b/);
+  const nonce = match1?.[0] || (match2 ? match2[1] + match2[2] + match2[3] : null);
+  if (!nonce) return null;
+
+  const sId = embedUrl.split('/e-1/')[1]?.split('?')[0] ?? embedUrl.split('/').pop()?.split('?')[0];
+  const sourcesUrl = `${origin}/embed-2/v3/e-1/getSources?id=${sId}&_k=${nonce}`;
+
+  const { data } = await axios.get(sourcesUrl, {
+    headers: { 'User-Agent': UA, Accept: '*/*', 'X-Requested-With': 'XMLHttpRequest', Referer: referer },
+    timeout: 8000,
+  });
+
+  const subtitles: AnikotoSubtitle[] = (data?.tracks || [])
+    .filter((t: any) => t?.file)
+    .map((t: any) => ({ url: t.file, lang: t.label ?? 'Unknown', default: Boolean(t.default) }));
+
+  let m3u8: string | null = null;
+  if (!data?.encrypted || data?.sources?.[0]?.file?.includes('.m3u8')) {
+    m3u8 = data?.sources?.[0]?.file ?? null;
+  } else {
+    try {
+      const keys = await getMegacloudKeys();
+      const secret = keys['mega'];
+      const decryptUrl =
+        `https://megacloud-api-nine.vercel.app/` +
+        `?encrypted_data=${encodeURIComponent(data.sources[0].file)}` +
+        `&nonce=${encodeURIComponent(nonce)}` +
+        `&secret=${encodeURIComponent(secret)}`;
+      const { data: decrypted } = await axios.get(decryptUrl, { timeout: 8000 });
+      m3u8 = (typeof decrypted === 'string' ? decrypted : JSON.stringify(decrypted)).match(/"file":"(.*?)"/)?.[1] ?? null;
+    } catch {
+      m3u8 = null;
+    }
+  }
+
+  if (!m3u8) return null;
+  return { embedUrl, m3u8, referer, subtitles, serverName, type: 'hls' };
+}
+
+// ── Megaplay (megaplay.buzz / vidwish.live / vidtube.site mirrors) ──
+async function doMegaplay(host: string, html: string, referer: string, serverName: string): Promise<AnikotoStream | null> {
+  const match = html.match(/<title>File ([0-9]+)/);
+  if (!match) return null;
+  const id = match[1];
+
+  const { data } = await axios.get(`https://${host}/stream/getSources?id=${id}`, {
+    headers: { 'User-Agent': UA, 'X-Requested-With': 'XMLHttpRequest', Referer: referer },
+    timeout: 8000,
+  });
+
+  let m3u8: string | undefined = data?.sources?.file;
+  const subtitles: AnikotoSubtitle[] = (data?.tracks || [])
+    .filter((t: any) => t?.file)
+    .map((t: any) => ({ url: t.file, lang: t.label ?? 'Unknown', default: Boolean(t.default) }));
+
+  if (m3u8 && m3u8.includes('mewstream.buzz')) {
+    let replacementHost = '1oe.lostproject.club';
+    const firstTrack = subtitles.find((t) => t.url && !t.url.includes('mewstream.buzz'));
+    if (firstTrack) {
+      try {
+        replacementHost = new URL(firstTrack.url).host;
+      } catch {
+        // keep default fallback host
+      }
+    }
+    try {
+      const parsed = new URL(m3u8);
+      parsed.host = replacementHost;
+      m3u8 = parsed.toString();
+    } catch {
+      // keep original m3u8 if rewriting fails
+    }
+  }
+
+  if (!m3u8) return null;
+  return { embedUrl: `https://${host}/`, m3u8, referer, subtitles, serverName, type: 'hls' };
+}
+
+// ── Generic chain: follow the embed page (and any nested iframe) until it
+//    resolves to a known megacloud/megaplay host, mirroring anikoto's own
+//    extractStreamUrl chain so domain rotations stay handled the same way.
+async function resolveAnikotoEmbed(embedUrl: string, serverName: string): Promise<AnikotoStream | null> {
+  const hostname = new URL(embedUrl).hostname;
+
+  if (hostname.includes('megaplay.buzz') || hostname.includes('vidwish.live') || hostname.includes('megacloud.bloggy.click')) {
+    const url = embedUrl.replace('vidwish.live', 'megaplay.buzz').replace('megacloud.bloggy.click', 'megaplay.buzz');
+    const host = new URL(url).host;
+    const referer = `https://${host}/`;
+    const { data: html } = await axios.get<string>(url, { headers: { 'User-Agent': UA, Referer: referer }, timeout: 8000 });
+    return doMegaplay(host, html, referer, serverName);
+  }
+
+  if (hostname.includes('megacloud.blog')) {
+    const referer = new URL(embedUrl).origin + '/';
+    const { data: html } = await axios.get<string>(embedUrl, { headers: { 'User-Agent': UA, Referer: referer }, timeout: 8000 });
+    return doMegacloud(embedUrl, html, referer, serverName);
+  }
+
+  if (hostname.includes('vidtube.site')) {
+    const host = new URL(embedUrl).host;
+    const referer = `https://${host}/`;
+    const { data: html } = await axios.get<string>(embedUrl, { headers: { 'User-Agent': UA, Referer: referer }, timeout: 8000 });
+    return doMegaplay(host, html, referer, serverName);
+  }
+
+  // Unknown host — follow one redirect hop via an <iframe> if present, then give up.
+  let currentUrl = embedUrl;
+  for (let i = 0; i < 2; i++) {
+    let host = new URL(currentUrl).host;
+    let referer = `https://${host}/`;
+    let html: string;
+    try {
+      const res = await axios.get<string>(currentUrl, { headers: { 'User-Agent': UA, Referer: referer }, timeout: 8000 });
+      html = res.data;
+    } catch {
+      return null;
+    }
+
+    const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+    if (iframeMatch) {
+      const resolved = new URL(iframeMatch[1], currentUrl).toString();
+      if (resolved !== currentUrl) {
+        currentUrl = resolved;
+        continue;
+      }
+    }
+
+    const finalHost = new URL(currentUrl).hostname;
+    if (finalHost.includes('megaplay.buzz') || finalHost.includes('vidwish.live') || finalHost.includes('vidtube.site')) {
+      return doMegaplay(new URL(currentUrl).host, html, `https://${new URL(currentUrl).host}/`, serverName);
+    }
+    if (finalHost.includes('megacloud.blog')) {
+      return doMegacloud(currentUrl, html, `https://${new URL(currentUrl).host}/`, serverName);
+    }
+    return null;
+  }
+  return null;
+}
+
+export async function getAnikotoEmbedUrl(sourceId: string): Promise<AnikotoStream | null> {
+  const parts = sourceId.split('::');
+
+  if (parts[0] === 'kiwi') {
+    const [, malId, epNum, timestamp, type] = parts;
+    if (!malId || !epNum || !timestamp) return null;
+    return resolveKiwi(malId, epNum, timestamp, (type as 'sub' | 'dub') || 'sub').catch(() => null);
+  }
+
+  const [slug, epNumStr, , linkId, svId] = parts;
+  if (!slug || !linkId) return null;
+
+  try {
+    const svParam = svId ? { sv: svId } : {};
+    const res = await ajax.get('/ajax/server', {
+      params: { get: linkId, ...svParam },
+      headers: { Referer: `${BASE}/watch/${slug}/ep-${epNumStr}` },
+    });
+    const embedUrl: string | undefined = res.data?.result?.url;
+    if (!embedUrl) return null;
+
+    return await resolveAnikotoEmbed(embedUrl, 'anikoto');
+  } catch {
+    return null;
+  }
+}
