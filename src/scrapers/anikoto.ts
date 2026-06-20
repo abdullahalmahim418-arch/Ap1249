@@ -1,5 +1,6 @@
 import * as cheerio from 'cheerio';
 import axios from 'axios';
+import { inspect } from 'util';
 import { makeClient, makeAjaxClient } from '../utils/fetch';
 import { cacheGet, cacheSet } from '../utils/cache';
 
@@ -41,8 +42,11 @@ const KIWI_MAPPER_URLS = [
 // Every failure point in the embed-resolution chain below logs through this,
 // so a "not playable" report can be traced to an exact step from Railway logs
 // instead of just a silent null. Grep for "[anikoto]".
+// IMPORTANT: uses util.inspect with depth:null — plain console.error(obj)
+// truncates nested objects at depth 2, which previously hid exactly the
+// field we needed to see (the Kiwi mapper's nested `download` shape).
 function log(label: string, extra?: any) {
-  if (extra !== undefined) console.error(`[anikoto] ${label}`, extra);
+  if (extra !== undefined) console.error(`[anikoto] ${label}`, inspect(extra, { depth: null, colors: false, maxArrayLength: 20 }));
   else console.error(`[anikoto] ${label}`);
 }
 
@@ -330,6 +334,29 @@ async function parseM3u8Subtitles(m3u8Url: string, referer: string): Promise<Ani
   }
 }
 
+// The mapper's documented shape is `{ [server]: { sub: { url } } }`, but live
+// responses have been observed nesting the actual code one level deeper under
+// `download` (e.g. `{ sub: { download: { url } } }` or keyed by quality under
+// `download`). This checks the direct shape first, then probes one level into
+// `download` for anything that looks like a server code.
+function extractServerCode(entry: any): string | null {
+  if (!entry || typeof entry !== 'object') return null;
+  if (typeof entry.url === 'string') return entry.url;
+
+  const nested = entry.download;
+  if (nested) {
+    if (typeof nested === 'string') return nested;
+    if (typeof nested === 'object') {
+      if (typeof nested.url === 'string') return nested.url;
+      for (const v of Object.values(nested)) {
+        if (typeof v === 'string') return v;
+        if (v && typeof v === 'object' && typeof (v as any).url === 'string') return (v as any).url;
+      }
+    }
+  }
+  return null;
+}
+
 // ── Kiwi Mapper ──────────────────────────────────────────────
 async function resolveKiwi(malId: string, epNum: string, timestamp: string, type: 'sub' | 'dub'): Promise<AnikotoStream | null> {
   for (const mapperBase of KIWI_MAPPER_URLS) {
@@ -348,20 +375,21 @@ async function resolveKiwi(malId: string, epNum: string, timestamp: string, type
       for (const key of Object.keys(data)) {
         if (key === 'status') continue;
         const entry = data[key]?.[type];
-        if (entry?.url && typeof entry.url === 'string') {
-          serverCode = entry.url;
+        const code = extractServerCode(entry);
+        if (code) {
+          serverCode = code;
           break;
         }
       }
       if (!serverCode) {
-        log(`kiwi: ${mapperBase} had no "${type}" entry`, data);
+        log(`kiwi: ${mapperBase} had no extractable "${type}" code`, data);
         continue;
       }
 
       const serverRes = await ajax.get('/ajax/server', { params: { get: serverCode } });
       let embedUrl: string | null = serverRes.data?.result?.url ?? null;
       if (!embedUrl) {
-        log('kiwi: /ajax/server?get= returned no url', serverRes.data);
+        log('kiwi: /ajax/server?get= returned no url', { serverCode, response: serverRes.data });
         continue;
       }
 
