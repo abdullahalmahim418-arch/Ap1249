@@ -2,6 +2,7 @@ import axios from 'axios';
 import { anilistClient } from './fetch';
 import { cacheGet, cacheSet } from './cache';
 import { findAnimeHeavenId } from '../scrapers/animeheaven';
+import { findAnikotoSlug } from '../scrapers/anikoto';
 
 export interface SiteIds {
   anilistId: number;
@@ -12,6 +13,7 @@ export interface SiteIds {
     gogoanime?: string;
     animeheaven?: string;
     anidao?: string;
+    anikoto?: string;
   };
 }
 
@@ -19,6 +21,14 @@ async function enrichAnimeHeaven(result: SiteIds): Promise<SiteIds> {
   if (!result.siteIds.animeheaven && result.title !== 'Unknown') {
     const id = await findAnimeHeavenId(result.title).catch(() => null);
     if (id) result.siteIds.animeheaven = id;
+  }
+  return result;
+}
+
+async function enrichAnikoto(result: SiteIds): Promise<SiteIds> {
+  if (!result.siteIds.anikoto && result.title !== 'Unknown') {
+    const slug = await findAnikotoSlug(result.title).catch(() => null);
+    if (slug) result.siteIds.anikoto = slug;
   }
   return result;
 }
@@ -57,8 +67,11 @@ export async function getSiteIds(anilistId: number): Promise<SiteIds | null> {
   const cached = cacheGet<SiteIds>(cacheKey);
   if (cached) {
     const wasMissingAnimeHeaven = !cached.siteIds.animeheaven;
-    const enriched = await enrichAnimeHeaven(cached);
-    if (wasMissingAnimeHeaven && enriched.siteIds.animeheaven) cacheSet(cacheKey, enriched);
+    const wasMissingAnikoto = !cached.siteIds.anikoto;
+    const enriched = await enrichAnikoto(await enrichAnimeHeaven(cached));
+    if ((wasMissingAnimeHeaven && enriched.siteIds.animeheaven) || (wasMissingAnikoto && enriched.siteIds.anikoto)) {
+      cacheSet(cacheKey, enriched);
+    }
     return enriched;
   }
 
@@ -90,6 +103,7 @@ export async function getSiteIds(anilistId: number): Promise<SiteIds | null> {
   }
 
   await enrichAnimeHeaven(result);
+  await enrichAnikoto(result);
 
   // If still no zoro ID, try a slug guess (title-anilistId format common on HiAnime clones)
   // This is a heuristic and may not always work
