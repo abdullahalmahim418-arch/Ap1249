@@ -68,49 +68,22 @@ export async function getEpisodes(animeId: string): Promise<SenshiEpisode[]> {
 }
 
 function resolveEmbedType(embed: any): 'sub' | 'dub' | 'raw' {
-  // Check multiple possible fields the API might use to signal dub/sub/raw
-  const raw = String(embed.status ?? embed.type ?? embed.lang ?? embed.audio ?? '').toLowerCase();
+  const status = String(embed.status ?? embed.type ?? embed.lang ?? embed.audio ?? '').toLowerCase();
 
   if (
-    raw.includes('dub') ||
-    raw.includes('english') ||
-    raw === 'en' ||
-    raw.includes('dubbed')
+    status.includes('dub') ||
+    status.includes('english') ||
+    status === 'en' ||
+    status.includes('dubbed')
   ) {
     return 'dub';
   }
 
-  if (raw.includes('raw')) {
+  if (status.includes('raw')) {
     return 'raw';
   }
 
   return 'sub';
-}
-
-/**
- * Derive the correct Referer for a stream URL.
- *
- * CDN providers (ninstream, etc.) enforce Referer checks. Sub streams are
- * served via Senshi's own player so senshi.live works fine as Referer.
- * Dub streams often come from a *different* CDN that expects its own origin
- * as Referer — sending senshi.live to that CDN gets a 403.
- *
- * Strategy:
- *  1. If the stream URL is on senshi.live itself → use senshi.live as Referer.
- *  2. Otherwise derive the Referer from the stream URL's own origin.
- *     Most CDNs only validate that Referer matches their own domain, so
- *     sending `https://cdn.example.com/` satisfies the check.
- */
-function deriveReferer(url: string): string {
-  try {
-    const parsed = new URL(url);
-    if (parsed.hostname.endsWith('senshi.live') || parsed.hostname === 'senshi.live') {
-      return BASE + '/';
-    }
-    return parsed.origin + '/';
-  } catch {
-    return BASE + '/';
-  }
 }
 
 export async function getServers(episodeId: string): Promise<SenshiServer[]> {
@@ -169,11 +142,10 @@ export async function getEmbedUrl(sourceId: string): Promise<EmbedResult | null>
       embedUrl: sourceId,
       serverName: 'Senshi',
       type: sourceId.includes('.m3u8') ? 'hls' : 'iframe',
-      // Derive the correct Referer from the stream URL's own origin.
-      // Previously this was hardcoded to senshi.live, which caused 403s on
-      // dub streams served from third-party CDNs that enforce their own
-      // Referer policy and reject requests coming from a different origin.
-      referer: deriveReferer(sourceId),
+      // ninstream.com and similar CDNs whitelist senshi.live as the allowed
+      // player origin. Always send senshi.live as Referer — both for sub and
+      // dub streams — so the CDN's origin check passes.
+      referer: BASE + '/',
     };
   }
 
@@ -189,17 +161,12 @@ export async function getEmbedUrl(sourceId: string): Promise<EmbedResult | null>
         embedUrl: data.link,
         serverName: data.server ?? 'unknown',
         type: data.type ?? 'iframe',
-        referer: deriveReferer(data.link),
+        referer: BASE + '/',
       };
     }
 
     if (data?.url) {
-      return {
-        embedUrl: data.url,
-        serverName: 'server',
-        type: 'iframe',
-        referer: deriveReferer(data.url),
-      };
+      return { embedUrl: data.url, serverName: 'server', type: 'iframe', referer: BASE + '/' };
     }
 
     return null;
