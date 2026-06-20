@@ -303,7 +303,12 @@ async function watchHandler(req: Request, res: Response) {
 
     const directM3u8 = typeof embedResult.embedUrl === 'string' && embedResult.embedUrl.includes('.m3u8');
     const stream = directM3u8 ? null : await resolveEmbed(embedResult.embedUrl);
-    const hasHls = Boolean(directM3u8 || stream?.m3u8);
+    const m3u8Url = directM3u8 ? embedResult.embedUrl : (stream?.m3u8 ?? null);
+    const hasHls = Boolean(m3u8Url);
+    // CDNs like ninstream.com block datacenter/proxy IPs with 403 regardless
+    // of headers. Expose the raw m3u8 as hlsDirectUrl so the browser can play
+    // it directly with HLS.js using its own residential IP.
+    // hlsProxyUrl is still included as fallback for CDNs that allow proxies.
     return res.json({
       anilistId: siteIds.anilistId,
       malId: siteIds.malId,
@@ -314,8 +319,9 @@ async function watchHandler(req: Request, res: Response) {
       server: usedServer,
       availableServers: filtered.map((s: any) => s.name),
       embedUrl: embedResult.embedUrl,
-      m3u8: directM3u8 ? embedResult.embedUrl : stream?.m3u8 ?? null,
-      hlsProxyUrl: directM3u8 ? proxiedHlsUrl(req, embedResult.embedUrl, embedResult.referer) : (stream?.m3u8 ? proxiedHlsUrl(req, stream.m3u8, embedResult.referer) : null),
+      m3u8: m3u8Url,
+      hlsDirectUrl: m3u8Url,
+      hlsProxyUrl: m3u8Url ? proxiedHlsUrl(req, m3u8Url, embedResult.referer) : null,
       playbackMode: hasHls ? 'hls' : 'iframe',
       iframeOnly: !hasHls,
       subtitles: stream?.subtitles ?? [],
