@@ -386,11 +386,22 @@ async function resolveKiwi(malId: string, epNum: string, timestamp: string, type
         continue;
       }
 
-      const serverRes = await ajax.get('/ajax/server', { params: { get: serverCode } });
-      let embedUrl: string | null = serverRes.data?.result?.url ?? null;
-      if (!embedUrl) {
-        log('kiwi: /ajax/server?get= returned no url', { serverCode, response: serverRes.data });
-        continue;
+      // The mapper used to return anikoto-internal link codes that had to be
+      // resolved through /ajax/server. Live responses now sometimes hand back
+      // an already-resolved external URL (e.g. a pahe.nekostream.site link)
+      // instead — feeding *that* into /ajax/server?get= isn't a valid
+      // anikoto link id, so anikoto's own endpoint rejects it with a plain
+      // "Bad request" response. Detect that case and use it directly.
+      let embedUrl: string | null;
+      if (/^https?:\/\//i.test(serverCode)) {
+        embedUrl = serverCode;
+      } else {
+        const serverRes = await ajax.get('/ajax/server', { params: { get: serverCode } });
+        embedUrl = serverRes.data?.result?.url ?? null;
+        if (!embedUrl) {
+          log('kiwi: /ajax/server?get= returned no url', { serverCode, response: serverRes.data });
+          continue;
+        }
       }
 
       if (embedUrl.includes('#')) {
