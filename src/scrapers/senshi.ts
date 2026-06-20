@@ -67,6 +67,26 @@ export async function getEpisodes(animeId: string): Promise<SenshiEpisode[]> {
   return episodes;
 }
 
+function resolveEmbedType(embed: any): 'sub' | 'dub' | 'raw' {
+  // Check multiple possible fields the API might use to signal dub/sub/raw
+  const raw = String(embed.status ?? embed.type ?? embed.lang ?? embed.audio ?? '').toLowerCase();
+
+  if (
+    raw.includes('dub') ||
+    raw.includes('english') ||
+    raw === 'en' ||
+    raw.includes('dubbed')
+  ) {
+    return 'dub';
+  }
+
+  if (raw.includes('raw')) {
+    return 'raw';
+  }
+
+  return 'sub';
+}
+
 export async function getServers(episodeId: string): Promise<SenshiServer[]> {
   if (episodeId.includes(':')) {
     const [animeId, epNum] = episodeId.split(':');
@@ -77,9 +97,8 @@ export async function getServers(episodeId: string): Promise<SenshiServer[]> {
 
     return embeds
       .map((embed: any, index: number) => {
-        const status = String(embed.status ?? '').toLowerCase();
-        const type = status.includes('dub') ? 'dub' : status.includes('raw') ? 'raw' : 'sub';
-        const name = embed.status || `Server ${index + 1}`;
+        const type = resolveEmbedType(embed);
+        const name = embed.status || embed.type || embed.lang || `Server ${index + 1}`;
         const sourceId = embed.url || embed.server2 || embed.serverFM || '';
         return sourceId ? { name, serverId: String(index + 1), sourceId, type } : null;
       })
