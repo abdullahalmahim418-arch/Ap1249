@@ -38,6 +38,26 @@ const KIWI_MAPPER_URLS = [
   'https://mapper.mewcdn.online/api/mal',
 ];
 
+// Every failure point in the embed-resolution chain below logs through this,
+// so a "not playable" report can be traced to an exact step from Railway logs
+// instead of just a silent null. Grep for "[anikoto]".
+function log(label: string, extra?: any) {
+  if (extra !== undefined) console.error(`[anikoto] ${label}`, extra);
+  else console.error(`[anikoto] ${label}`);
+}
+
+function errInfo(err: any): any {
+  if (err?.isAxiosError) {
+    return {
+      status: err.response?.status,
+      statusText: err.response?.statusText,
+      url: err.config?.url,
+      body: typeof err.response?.data === 'string' ? err.response.data.slice(0, 300) : err.response?.data,
+    };
+  }
+  return err instanceof Error ? err.message : err;
+}
+
 export interface AnikotoEpisode {
   num: number;
   id: string;
@@ -231,7 +251,10 @@ export async function getAnikotoEpisodes(slug: string): Promise<AnikotoEpisode[]
 
 export async function getAnikotoServers(episodeId: string): Promise<AnikotoServer[]> {
   const [slug, epNumStr, dataIds, dataMal, dataTimestamp] = episodeId.split('::');
-  if (!slug || !epNumStr) return [];
+  if (!slug || !epNumStr) {
+    log('getAnikotoServers: malformed episodeId', episodeId);
+    return [];
+  }
 
   const servers: AnikotoServer[] = [];
 
@@ -258,8 +281,12 @@ export async function getAnikotoServers(episodeId: string): Promise<AnikotoServe
           type,
         });
       });
-    } catch {
-      // server list fetch failed — Kiwi (below) may still work
+
+      if (servers.length === 0) {
+        log('getAnikotoServers: /ajax/server/list returned no parseable .server/li elements', { slug, dataIds, htmlSnippet: String(html).slice(0, 300) });
+      }
+    } catch (err) {
+      log('getAnikotoServers: /ajax/server/list threw', { slug, dataIds, ...errInfo(err) });
     }
   }
 
@@ -312,7 +339,10 @@ async function resolveKiwi(malId: string, epNum: string, timestamp: string, type
         headers: { ...DEFAULT_HEADERS, Referer: BASE + '/', Origin: BASE },
         timeout: 8000,
       });
-      if (!data || typeof data !== 'object') continue;
+      if (!data || typeof data !== 'object') {
+        log(`kiwi: ${mapperBase} returned non-object`, data);
+        continue;
+      }
 
       let serverCode: string | null = null;
       for (const key of Object.keys(data)) {
@@ -323,27 +353,35 @@ async function resolveKiwi(malId: string, epNum: string, timestamp: string, type
           break;
         }
       }
-      if (!serverCode) continue;
+      if (!serverCode) {
+        log(`kiwi: ${mapperBase} had no "${type}" entry`, data);
+        continue;
+      }
 
       const serverRes = await ajax.get('/ajax/server', { params: { get: serverCode } });
       let embedUrl: string | null = serverRes.data?.result?.url ?? null;
-      if (!embedUrl) continue;
+      if (!embedUrl) {
+        log('kiwi: /ajax/server?get= returned no url', serverRes.data);
+        continue;
+      }
 
       if (embedUrl.includes('#')) {
         try {
           embedUrl = Buffer.from(embedUrl.split('#')[1], 'base64').toString('utf-8');
-        } catch {
-          // leave embedUrl as-is
+        } catch (err) {
+          log('kiwi: base64 decode of embedUrl fragment failed', errInfo(err));
         }
       }
 
       const referer = 'https://kwik.cx2.mewcdn.online/';
       const subtitles = await parseM3u8Subtitles(embedUrl, referer);
+      log(`kiwi: resolved via ${mapperBase}`, { embedUrl });
       return { embedUrl, m3u8: embedUrl, referer, subtitles, serverName: 'Kiwi Stream', type: 'hls' };
-    } catch {
-      // try the next mapper mirror
+    } catch (err) {
+      log(`kiwi: ${mapperBase} threw`, errInfo(err));
     }
   }
+  log('kiwi: all mapper mirrors failed');
   return null;
 }
 
@@ -361,7 +399,16 @@ async function resolveVidstream(embedUrl: string, referer: string): Promise<Anik
     const epIdMatch = html.match(/data-ep-id=["'](\d+)["']/);
     const typeMatch = html.match(/type:\s*'(\w+)'/);
     const domain2Match = html.match(/domain2_url:\s*'([^']+)'/);
-    if (!epIdMatch || !typeMatch || !domain2Match) return null;
+    if (!epIdMatch || !typeMatch || !domain2Match) {
+      log('vidstream: regex miss on embed page', {
+        embedUrl,
+        hasEpId: Boolean(epIdMatch),
+        hasType: Boolean(typeMatch),
+        hasDomain2: Boolean(domain2Match),
+        htmlSnippet: html.slice(0, 300),
+      });
+      return null;
+    }
 
     const epId = epIdMatch[1];
     const epType = typeMatch[1];
@@ -378,10 +425,14 @@ async function resolveVidstream(embedUrl: string, referer: string): Promise<Anik
       .filter((t: any) => t?.file)
       .map((t: any) => ({ url: t.file, lang: t.label ?? 'Unknown', default: Boolean(t.default) }));
     const m3u8: string | undefined = sources[0]?.url;
-    if (!m3u8) return null;
+    if (!m3u8) {
+      log('vidstream: save_data.php had no sources', { saveDataUrl, data });
+      return null;
+    }
 
     return { embedUrl, m3u8, referer: domain2 + '/', subtitles, serverName: 'Vidstream', type: 'hls' };
-  } catch {
+  } catch (err) {
+    log('vidstream: threw', { embedUrl, ...errInfo(err) });
     return null;
   }
 }
@@ -404,146 +455,177 @@ async function getMegacloudKeys(): Promise<Record<string, string>> {
 }
 
 async function doMegacloud(embedUrl: string, html: string, referer: string, serverName: string): Promise<AnikotoStream | null> {
-  const origin = new URL(embedUrl).origin;
+  try {
+    const origin = new URL(embedUrl).origin;
 
-  const match1 = html.match(/\b[a-zA-Z0-9]{48}\b/);
-  const match2 = html.match(/\b([a-zA-Z0-9]{16})\b.*?\b([a-zA-Z0-9]{16})\b.*?\b([a-zA-Z0-9]{16})\b/);
-  const nonce = match1?.[0] || (match2 ? match2[1] + match2[2] + match2[3] : null);
-  if (!nonce) return null;
-
-  const sId = embedUrl.split('/e-1/')[1]?.split('?')[0] ?? embedUrl.split('/').pop()?.split('?')[0];
-  const sourcesUrl = `${origin}/embed-2/v3/e-1/getSources?id=${sId}&_k=${nonce}`;
-
-  const { data } = await axios.get(sourcesUrl, {
-    headers: { ...DEFAULT_HEADERS, Accept: '*/*', 'X-Requested-With': 'XMLHttpRequest', Referer: referer },
-    timeout: 8000,
-  });
-
-  const subtitles: AnikotoSubtitle[] = (data?.tracks || [])
-    .filter((t: any) => t?.file)
-    .map((t: any) => ({ url: t.file, lang: t.label ?? 'Unknown', default: Boolean(t.default) }));
-
-  let m3u8: string | null = null;
-  if (!data?.encrypted || data?.sources?.[0]?.file?.includes('.m3u8')) {
-    m3u8 = data?.sources?.[0]?.file ?? null;
-  } else {
-    try {
-      const keys = await getMegacloudKeys();
-      const secret = keys['mega'];
-      const decryptUrl =
-        `https://megacloud-api-nine.vercel.app/` +
-        `?encrypted_data=${encodeURIComponent(data.sources[0].file)}` +
-        `&nonce=${encodeURIComponent(nonce)}` +
-        `&secret=${encodeURIComponent(secret)}`;
-      const { data: decrypted } = await axios.get(decryptUrl, { timeout: 8000 });
-      m3u8 = (typeof decrypted === 'string' ? decrypted : JSON.stringify(decrypted)).match(/"file":"(.*?)"/)?.[1] ?? null;
-    } catch {
-      m3u8 = null;
+    const match1 = html.match(/\b[a-zA-Z0-9]{48}\b/);
+    const match2 = html.match(/\b([a-zA-Z0-9]{16})\b.*?\b([a-zA-Z0-9]{16})\b.*?\b([a-zA-Z0-9]{16})\b/);
+    const nonce = match1?.[0] || (match2 ? match2[1] + match2[2] + match2[3] : null);
+    if (!nonce) {
+      log('megacloud: no nonce found in embed HTML', { embedUrl, htmlSnippet: html.slice(0, 300) });
+      return null;
     }
-  }
 
-  if (!m3u8) return null;
-  return { embedUrl, m3u8, referer, subtitles, serverName, type: 'hls' };
+    const sId = embedUrl.split('/e-1/')[1]?.split('?')[0] ?? embedUrl.split('/').pop()?.split('?')[0];
+    const sourcesUrl = `${origin}/embed-2/v3/e-1/getSources?id=${sId}&_k=${nonce}`;
+
+    const { data } = await axios.get(sourcesUrl, {
+      headers: { ...DEFAULT_HEADERS, Accept: '*/*', 'X-Requested-With': 'XMLHttpRequest', Referer: referer },
+      timeout: 8000,
+    });
+
+    const subtitles: AnikotoSubtitle[] = (data?.tracks || [])
+      .filter((t: any) => t?.file)
+      .map((t: any) => ({ url: t.file, lang: t.label ?? 'Unknown', default: Boolean(t.default) }));
+
+    let m3u8: string | null = null;
+    if (!data?.encrypted || data?.sources?.[0]?.file?.includes('.m3u8')) {
+      m3u8 = data?.sources?.[0]?.file ?? null;
+      if (!m3u8) log('megacloud: getSources returned no usable sources', { sourcesUrl, data });
+    } else {
+      try {
+        const keys = await getMegacloudKeys();
+        const secret = keys['mega'];
+        if (!secret) log('megacloud: "mega" key missing from MegacloudKeys/keys.json', keys);
+        const decryptUrl =
+          `https://megacloud-api-nine.vercel.app/` +
+          `?encrypted_data=${encodeURIComponent(data.sources[0].file)}` +
+          `&nonce=${encodeURIComponent(nonce)}` +
+          `&secret=${encodeURIComponent(secret)}`;
+        const { data: decrypted } = await axios.get(decryptUrl, { timeout: 8000 });
+        m3u8 = (typeof decrypted === 'string' ? decrypted : JSON.stringify(decrypted)).match(/"file":"(.*?)"/)?.[1] ?? null;
+        if (!m3u8) log('megacloud: decrypt API returned no "file"', decrypted);
+      } catch (err) {
+        log('megacloud: decrypt step threw', errInfo(err));
+        m3u8 = null;
+      }
+    }
+
+    if (!m3u8) return null;
+    return { embedUrl, m3u8, referer, subtitles, serverName, type: 'hls' };
+  } catch (err) {
+    log('megacloud: threw', { embedUrl, ...errInfo(err) });
+    return null;
+  }
 }
 
 // ── Megaplay (megaplay.buzz / vidwish.live / vidtube.site mirrors) ──
 async function doMegaplay(host: string, html: string, referer: string, serverName: string): Promise<AnikotoStream | null> {
   const match = html.match(/<title>File ([0-9]+)/);
-  if (!match) return null;
+  if (!match) {
+    log('megaplay: no "<title>File N" match — page may not be a megaplay player', { host, htmlSnippet: html.slice(0, 300) });
+    return null;
+  }
   const id = match[1];
 
-  const { data } = await axios.get(`https://${host}/stream/getSources?id=${id}`, {
-    headers: { ...DEFAULT_HEADERS, 'X-Requested-With': 'XMLHttpRequest', Referer: referer },
-    timeout: 8000,
-  });
+  try {
+    const { data } = await axios.get(`https://${host}/stream/getSources?id=${id}`, {
+      headers: { ...DEFAULT_HEADERS, 'X-Requested-With': 'XMLHttpRequest', Referer: referer },
+      timeout: 8000,
+    });
 
-  let m3u8: string | undefined = data?.sources?.file;
-  const subtitles: AnikotoSubtitle[] = (data?.tracks || [])
-    .filter((t: any) => t?.file)
-    .map((t: any) => ({ url: t.file, lang: t.label ?? 'Unknown', default: Boolean(t.default) }));
+    let m3u8: string | undefined = data?.sources?.file;
+    const subtitles: AnikotoSubtitle[] = (data?.tracks || [])
+      .filter((t: any) => t?.file)
+      .map((t: any) => ({ url: t.file, lang: t.label ?? 'Unknown', default: Boolean(t.default) }));
 
-  if (m3u8 && m3u8.includes('mewstream.buzz')) {
-    let replacementHost = '1oe.lostproject.club';
-    const firstTrack = subtitles.find((t) => t.url && !t.url.includes('mewstream.buzz'));
-    if (firstTrack) {
+    if (m3u8 && m3u8.includes('mewstream.buzz')) {
+      let replacementHost = '1oe.lostproject.club';
+      const firstTrack = subtitles.find((t) => t.url && !t.url.includes('mewstream.buzz'));
+      if (firstTrack) {
+        try {
+          replacementHost = new URL(firstTrack.url).host;
+        } catch {
+          // keep default fallback host
+        }
+      }
       try {
-        replacementHost = new URL(firstTrack.url).host;
+        const parsed = new URL(m3u8);
+        parsed.host = replacementHost;
+        m3u8 = parsed.toString();
       } catch {
-        // keep default fallback host
+        // keep original m3u8 if rewriting fails
       }
     }
-    try {
-      const parsed = new URL(m3u8);
-      parsed.host = replacementHost;
-      m3u8 = parsed.toString();
-    } catch {
-      // keep original m3u8 if rewriting fails
-    }
-  }
 
-  if (!m3u8) return null;
-  return { embedUrl: `https://${host}/`, m3u8, referer, subtitles, serverName, type: 'hls' };
+    if (!m3u8) {
+      log('megaplay: getSources returned no sources.file', { host, id, data });
+      return null;
+    }
+    return { embedUrl: `https://${host}/`, m3u8, referer, subtitles, serverName, type: 'hls' };
+  } catch (err) {
+    log('megaplay: getSources threw', { host, id, ...errInfo(err) });
+    return null;
+  }
 }
 
 // ── Generic chain: follow the embed page (and any nested iframe) until it
 //    resolves to a known megacloud/megaplay host, mirroring anikoto's own
 //    extractStreamUrl chain so domain rotations stay handled the same way.
 async function resolveAnikotoEmbed(embedUrl: string, serverName: string): Promise<AnikotoStream | null> {
-  const hostname = new URL(embedUrl).hostname;
+  try {
+    const hostname = new URL(embedUrl).hostname;
 
-  if (hostname.includes('megaplay.buzz') || hostname.includes('vidwish.live') || hostname.includes('megacloud.bloggy.click')) {
-    const url = embedUrl.replace('vidwish.live', 'megaplay.buzz').replace('megacloud.bloggy.click', 'megaplay.buzz');
-    const host = new URL(url).host;
-    const referer = `https://${host}/`;
-    const { data: html } = await axios.get<string>(url, { headers: { ...DEFAULT_HEADERS, Referer: referer }, timeout: 8000 });
-    return doMegaplay(host, html, referer, serverName);
-  }
+    if (hostname.includes('megaplay.buzz') || hostname.includes('vidwish.live') || hostname.includes('megacloud.bloggy.click')) {
+      const url = embedUrl.replace('vidwish.live', 'megaplay.buzz').replace('megacloud.bloggy.click', 'megaplay.buzz');
+      const host = new URL(url).host;
+      const referer = `https://${host}/`;
+      const { data: html } = await axios.get<string>(url, { headers: { ...DEFAULT_HEADERS, Referer: referer }, timeout: 8000 });
+      return doMegaplay(host, html, referer, serverName);
+    }
 
-  if (hostname.includes('megacloud.blog')) {
-    const referer = new URL(embedUrl).origin + '/';
-    const { data: html } = await axios.get<string>(embedUrl, { headers: { ...DEFAULT_HEADERS, Referer: referer }, timeout: 8000 });
-    return doMegacloud(embedUrl, html, referer, serverName);
-  }
+    if (hostname.includes('megacloud.blog')) {
+      const referer = new URL(embedUrl).origin + '/';
+      const { data: html } = await axios.get<string>(embedUrl, { headers: { ...DEFAULT_HEADERS, Referer: referer }, timeout: 8000 });
+      return doMegacloud(embedUrl, html, referer, serverName);
+    }
 
-  if (hostname.includes('vidtube.site')) {
-    const host = new URL(embedUrl).host;
-    const referer = `https://${host}/`;
-    const { data: html } = await axios.get<string>(embedUrl, { headers: { ...DEFAULT_HEADERS, Referer: referer }, timeout: 8000 });
-    return doMegaplay(host, html, referer, serverName);
-  }
+    if (hostname.includes('vidtube.site')) {
+      const host = new URL(embedUrl).host;
+      const referer = `https://${host}/`;
+      const { data: html } = await axios.get<string>(embedUrl, { headers: { ...DEFAULT_HEADERS, Referer: referer }, timeout: 8000 });
+      return doMegaplay(host, html, referer, serverName);
+    }
 
-  // Unknown host — follow one redirect hop via an <iframe> if present, then give up.
-  let currentUrl = embedUrl;
-  for (let i = 0; i < 2; i++) {
-    let host = new URL(currentUrl).host;
-    let referer = `https://${host}/`;
-    let html: string;
-    try {
-      const res = await axios.get<string>(currentUrl, { headers: { ...DEFAULT_HEADERS, Referer: referer }, timeout: 8000 });
-      html = res.data;
-    } catch {
+    // Unknown host — follow one redirect hop via an <iframe> if present, then give up.
+    let currentUrl = embedUrl;
+    for (let i = 0; i < 2; i++) {
+      let host = new URL(currentUrl).host;
+      let referer = `https://${host}/`;
+      let html: string;
+      try {
+        const res = await axios.get<string>(currentUrl, { headers: { ...DEFAULT_HEADERS, Referer: referer }, timeout: 8000 });
+        html = res.data;
+      } catch (err) {
+        log('resolveAnikotoEmbed: unknown-host fetch threw', { currentUrl, ...errInfo(err) });
+        return null;
+      }
+
+      const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+      if (iframeMatch) {
+        const resolved = new URL(iframeMatch[1], currentUrl).toString();
+        if (resolved !== currentUrl) {
+          currentUrl = resolved;
+          continue;
+        }
+      }
+
+      const finalHost = new URL(currentUrl).hostname;
+      if (finalHost.includes('megaplay.buzz') || finalHost.includes('vidwish.live') || finalHost.includes('vidtube.site')) {
+        return doMegaplay(new URL(currentUrl).host, html, `https://${new URL(currentUrl).host}/`, serverName);
+      }
+      if (finalHost.includes('megacloud.blog')) {
+        return doMegacloud(currentUrl, html, `https://${new URL(currentUrl).host}/`, serverName);
+      }
+      log('resolveAnikotoEmbed: unrecognized host, no known extractor', { serverName, originalEmbedUrl: embedUrl, finalHost, htmlSnippet: html.slice(0, 300) });
       return null;
     }
-
-    const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
-    if (iframeMatch) {
-      const resolved = new URL(iframeMatch[1], currentUrl).toString();
-      if (resolved !== currentUrl) {
-        currentUrl = resolved;
-        continue;
-      }
-    }
-
-    const finalHost = new URL(currentUrl).hostname;
-    if (finalHost.includes('megaplay.buzz') || finalHost.includes('vidwish.live') || finalHost.includes('vidtube.site')) {
-      return doMegaplay(new URL(currentUrl).host, html, `https://${new URL(currentUrl).host}/`, serverName);
-    }
-    if (finalHost.includes('megacloud.blog')) {
-      return doMegacloud(currentUrl, html, `https://${new URL(currentUrl).host}/`, serverName);
-    }
+    log('resolveAnikotoEmbed: gave up after iframe-follow limit', { serverName, originalEmbedUrl: embedUrl, currentUrl });
+    return null;
+  } catch (err) {
+    log('resolveAnikotoEmbed: threw', { serverName, embedUrl, ...errInfo(err) });
     return null;
   }
-  return null;
 }
 
 export async function getAnikotoEmbedUrl(sourceId: string): Promise<AnikotoStream | null> {
@@ -551,12 +633,21 @@ export async function getAnikotoEmbedUrl(sourceId: string): Promise<AnikotoStrea
 
   if (parts[0] === 'kiwi') {
     const [, malId, epNum, timestamp, type] = parts;
-    if (!malId || !epNum || !timestamp) return null;
-    return resolveKiwi(malId, epNum, timestamp, (type as 'sub' | 'dub') || 'sub').catch(() => null);
+    if (!malId || !epNum || !timestamp) {
+      log('getAnikotoEmbedUrl: malformed kiwi sourceId', sourceId);
+      return null;
+    }
+    return resolveKiwi(malId, epNum, timestamp, (type as 'sub' | 'dub') || 'sub').catch((err) => {
+      log('getAnikotoEmbedUrl: resolveKiwi threw unexpectedly', errInfo(err));
+      return null;
+    });
   }
 
   const [slug, epNumStr, , linkId, svId, encodedName] = parts;
-  if (!slug || !linkId) return null;
+  if (!slug || !linkId) {
+    log('getAnikotoEmbedUrl: malformed regular sourceId', sourceId);
+    return null;
+  }
   const serverName = encodedName ? decodeURIComponent(encodedName) : 'anikoto';
 
   try {
@@ -567,7 +658,10 @@ export async function getAnikotoEmbedUrl(sourceId: string): Promise<AnikotoStrea
       headers: { Referer: epReferer },
     });
     const embedUrl: string | undefined = res.data?.result?.url;
-    if (!embedUrl) return null;
+    if (!embedUrl) {
+      log('getAnikotoEmbedUrl: /ajax/server?get= returned no url', { serverName, linkId, svId, response: res.data });
+      return null;
+    }
 
     // anikoto's reference implementation tries the VidStream save_data.php
     // path FIRST for any server named like Vidstream/VidPlay/Vid-*, falling
@@ -577,14 +671,20 @@ export async function getAnikotoEmbedUrl(sourceId: string): Promise<AnikotoStrea
 
     let result: AnikotoStream | null = null;
     if (isVidstreamLike) {
-      result = await resolveVidstream(embedUrl, epReferer).catch(() => null);
+      result = await resolveVidstream(embedUrl, epReferer).catch((err) => {
+        log('getAnikotoEmbedUrl: resolveVidstream threw unexpectedly', errInfo(err));
+        return null;
+      });
       if (result) result.serverName = serverName;
+      else log('getAnikotoEmbedUrl: vidstream path failed, falling back to standard chain', { serverName, embedUrl });
     }
     if (!result) {
       result = await resolveAnikotoEmbed(embedUrl, serverName);
     }
+    if (!result) log('getAnikotoEmbedUrl: all extraction paths failed', { serverName, embedUrl });
     return result;
-  } catch {
+  } catch (err) {
+    log('getAnikotoEmbedUrl: /ajax/server?get= threw', { serverName, linkId, svId, ...errInfo(err) });
     return null;
   }
 }
