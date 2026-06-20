@@ -303,12 +303,7 @@ async function watchHandler(req: Request, res: Response) {
 
     const directM3u8 = typeof embedResult.embedUrl === 'string' && embedResult.embedUrl.includes('.m3u8');
     const stream = directM3u8 ? null : await resolveEmbed(embedResult.embedUrl);
-    const m3u8Url = directM3u8 ? embedResult.embedUrl : (stream?.m3u8 ?? null);
-    const hasHls = Boolean(m3u8Url);
-    // CDNs like ninstream.com block datacenter/proxy IPs with 403 regardless
-    // of headers. Expose the raw m3u8 as hlsDirectUrl so the browser can play
-    // it directly with HLS.js using its own residential IP.
-    // hlsProxyUrl is still included as fallback for CDNs that allow proxies.
+    const hasHls = Boolean(directM3u8 || stream?.m3u8);
     return res.json({
       anilistId: siteIds.anilistId,
       malId: siteIds.malId,
@@ -319,9 +314,8 @@ async function watchHandler(req: Request, res: Response) {
       server: usedServer,
       availableServers: filtered.map((s: any) => s.name),
       embedUrl: embedResult.embedUrl,
-      m3u8: m3u8Url,
-      hlsDirectUrl: m3u8Url,
-      hlsProxyUrl: m3u8Url ? proxiedHlsUrl(req, m3u8Url, embedResult.referer) : null,
+      m3u8: directM3u8 ? embedResult.embedUrl : stream?.m3u8 ?? null,
+      hlsProxyUrl: directM3u8 ? proxiedHlsUrl(req, embedResult.embedUrl, embedResult.referer) : (stream?.m3u8 ? proxiedHlsUrl(req, stream.m3u8, embedResult.referer) : null),
       playbackMode: hasHls ? 'hls' : 'iframe',
       iframeOnly: !hasHls,
       subtitles: stream?.subtitles ?? [],
@@ -378,31 +372,13 @@ router.get('/proxy/hls', async (req: Request, res: Response) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Cache-Control', 'public, max-age=30');
 
-    // Detect HLS playlists by content-type, URL extension, OR body content.
-    // Many CDNs serve m3u8 at tokenized URLs with no .m3u8 extension and
-    // return generic content-types like application/octet-stream — so we must
-    // also sniff the body. Without this, sub-playlists and extension-less
-    // master playlists fall through to the raw bytes branch, HLS.js receives
-    // non-playlist data, and the video renders blank with no error.
-    const text = body.toString('utf8');
-    const isPlaylist =
-      url.includes('.m3u8') ||
-      contentType.includes('mpegurl') ||
-      text.trimStart().startsWith('#EXTM3U');
-
-    if (isPlaylist) {
-      if (!text.trimStart().startsWith('#EXTM3U')) {
+    if (url.includes('.m3u8') || contentType.includes('mpegurl')) {
+      const text = body.toString('utf8');
+      if (!text.trim().startsWith('#EXTM3U')) {
         return res.status(502).json({ error: 'Upstream did not return a valid m3u8 playlist', body: text.slice(0, 300) });
       }
-      // For sub-playlists (variant streams), derive the referer from the
-      // sub-playlist URL itself rather than blindly forwarding the top-level
-      // ref. This way segment requests carry the right CDN origin as Referer
-      // regardless of how many playlist levels deep we are.
-      const segRef = (() => {
-        try { return new URL(url).origin + '/'; } catch { return ref; }
-      })();
       res.type('application/vnd.apple.mpegurl');
-      return res.send(rewriteHlsPlaylist(req, text, url, segRef));
+      return res.send(rewriteHlsPlaylist(req, text, url, ref));
     }
 
     res.type(contentType || 'application/octet-stream');
