@@ -357,6 +357,14 @@ function extractServerCode(entry: any): string | null {
   return null;
 }
 
+// A real anikoto `data-link-id` server code is a short opaque token, never a
+// full URL. The mapper's `download` field, by contrast, IS a full URL (a
+// download-shortlink), and feeding that into `/ajax/server?get=` is a
+// category error — anikoto correctly 400s it. This distinguishes the two.
+function looksLikeServerCode(s: string): boolean {
+  return typeof s === 'string' && s.length > 0 && !/^https?:\/\//i.test(s);
+}
+
 // ── Kiwi Mapper ──────────────────────────────────────────────
 async function resolveKiwi(malId: string, epNum: string, timestamp: string, type: 'sub' | 'dub'): Promise<AnikotoStream | null> {
   for (const mapperBase of KIWI_MAPPER_URLS) {
@@ -372,39 +380,73 @@ async function resolveKiwi(malId: string, epNum: string, timestamp: string, type
       }
 
       let serverCode: string | null = null;
+      let directUrl: string | null = null;
       for (const key of Object.keys(data)) {
         if (key === 'status') continue;
         const entry = data[key]?.[type];
-        const code = extractServerCode(entry);
-        if (code) {
-          serverCode = code;
-          break;
+        if (!entry) continue;
+        // Always logged (full depth) — even on success — so the exact live
+        // shape is on record without needing another guess-and-redeploy loop.
+        log(`kiwi: entry for ${key}.${type}`, entry);
+
+        if (typeof entry.url === 'string') {
+          if (looksLikeServerCode(entry.url)) {
+            serverCode = entry.url;
+            break;
+          }
+          directUrl = directUrl ?? entry.url;
         }
-      }
-      if (!serverCode) {
-        log(`kiwi: ${mapperBase} had no extractable "${type}" code`, data);
-        continue;
-      }
-
-      const serverRes = await ajax.get('/ajax/server', { params: { get: serverCode } });
-      let embedUrl: string | null = serverRes.data?.result?.url ?? null;
-      if (!embedUrl) {
-        log('kiwi: /ajax/server?get= returned no url', { serverCode, response: serverRes.data });
-        continue;
-      }
-
-      if (embedUrl.includes('#')) {
-        try {
-          embedUrl = Buffer.from(embedUrl.split('#')[1], 'base64').toString('utf-8');
-        } catch (err) {
-          log('kiwi: base64 decode of embedUrl fragment failed', errInfo(err));
+        if (!serverCode) {
+          const fromDownload = extractServerCode(entry);
+          if (fromDownload && looksLikeServerCode(fromDownload)) {
+            serverCode = fromDownload;
+            break;
+          } else if (fromDownload) {
+            directUrl = directUrl ?? fromDownload;
+          }
         }
       }
 
-      const referer = 'https://kwik.cx2.mewcdn.online/';
-      const subtitles = await parseM3u8Subtitles(embedUrl, referer);
-      log(`kiwi: resolved via ${mapperBase}`, { embedUrl });
-      return { embedUrl, m3u8: embedUrl, referer, subtitles, serverName: 'Kiwi Stream', type: 'hls' };
+      // Path A: a real anikoto server code — resolve through /ajax/server?get=
+      if (serverCode) {
+        const serverRes = await ajax.get('/ajax/server', { params: { get: serverCode } });
+        let embedUrl: string | null = serverRes.data?.result?.url ?? null;
+        if (!embedUrl) {
+          log('kiwi: /ajax/server?get= returned no url for server code', { serverCode, response: serverRes.data });
+        } else {
+          if (embedUrl.includes('#')) {
+            try {
+              embedUrl = Buffer.from(embedUrl.split('#')[1], 'base64').toString('utf-8');
+            } catch (err) {
+              log('kiwi: base64 decode of embedUrl fragment failed', errInfo(err));
+            }
+          }
+          const referer = 'https://kwik.cx2.mewcdn.online/';
+          const subtitles = await parseM3u8Subtitles(embedUrl, referer);
+          log(`kiwi: resolved via ${mapperBase} (server-code path)`, { embedUrl });
+          return { embedUrl, m3u8: embedUrl, referer, subtitles, serverName: 'Kiwi Stream', type: 'hls' };
+        }
+      }
+
+      // Path B: no valid server code, but a direct URL was found (e.g. the
+      // `download` shortlink) — run it through the normal extractor chain in
+      // case it happens to resolve to a known megacloud/megaplay host.
+      if (directUrl) {
+        log('kiwi: no valid server code, trying direct link through extractor chain', { directUrl });
+        const resolved = await resolveAnikotoEmbed(directUrl, 'Kiwi Stream').catch((err) => {
+          log('kiwi: direct link resolution threw', errInfo(err));
+          return null;
+        });
+        if (resolved) {
+          log(`kiwi: resolved via ${mapperBase} (direct-link path)`, { directUrl, m3u8: resolved.m3u8 });
+          return resolved;
+        }
+        log('kiwi: direct link did not resolve via any known extractor', { directUrl });
+      }
+
+      if (!serverCode && !directUrl) {
+        log(`kiwi: ${mapperBase} had no usable "${type}" entry at all`, data);
+      }
     } catch (err) {
       log(`kiwi: ${mapperBase} threw`, errInfo(err));
     }
@@ -458,6 +500,7 @@ async function resolveVidstream(embedUrl: string, referer: string): Promise<Anik
       return null;
     }
 
+    log('vidstream: resolved', { embedUrl, m3u8 });
     return { embedUrl, m3u8, referer: domain2 + '/', subtitles, serverName: 'Vidstream', type: 'hls' };
   } catch (err) {
     log('vidstream: threw', { embedUrl, ...errInfo(err) });
@@ -530,6 +573,7 @@ async function doMegacloud(embedUrl: string, html: string, referer: string, serv
     }
 
     if (!m3u8) return null;
+    log('megacloud: resolved', { embedUrl, m3u8 });
     return { embedUrl, m3u8, referer, subtitles, serverName, type: 'hls' };
   } catch (err) {
     log('megacloud: threw', { embedUrl, ...errInfo(err) });
@@ -558,11 +602,14 @@ async function doMegaplay(host: string, html: string, referer: string, serverNam
       .map((t: any) => ({ url: t.file, lang: t.label ?? 'Unknown', default: Boolean(t.default) }));
 
     if (m3u8 && m3u8.includes('mewstream.buzz')) {
+      const original = m3u8;
       let replacementHost = '1oe.lostproject.club';
+      let source: 'subtitle-derived' | 'hardcoded-fallback' = 'hardcoded-fallback';
       const firstTrack = subtitles.find((t) => t.url && !t.url.includes('mewstream.buzz'));
       if (firstTrack) {
         try {
           replacementHost = new URL(firstTrack.url).host;
+          source = 'subtitle-derived';
         } catch {
           // keep default fallback host
         }
@@ -571,8 +618,9 @@ async function doMegaplay(host: string, html: string, referer: string, serverNam
         const parsed = new URL(m3u8);
         parsed.host = replacementHost;
         m3u8 = parsed.toString();
-      } catch {
-        // keep original m3u8 if rewriting fails
+        log('megaplay: rewrote mewstream.buzz host', { host, id, original, rewritten: m3u8, replacementHost, source });
+      } catch (err) {
+        log('megaplay: mewstream.buzz host rewrite failed, keeping original (likely dead) url', { host, id, original, ...errInfo(err) });
       }
     }
 
@@ -580,6 +628,7 @@ async function doMegaplay(host: string, html: string, referer: string, serverNam
       log('megaplay: getSources returned no sources.file', { host, id, data });
       return null;
     }
+    log('megaplay: resolved', { host, id, m3u8 });
     return { embedUrl: `https://${host}/`, m3u8, referer, subtitles, serverName, type: 'hls' };
   } catch (err) {
     log('megaplay: getSources threw', { host, id, ...errInfo(err) });
@@ -624,6 +673,14 @@ async function resolveAnikotoEmbed(embedUrl: string, serverName: string): Promis
       try {
         const res = await axios.get<string>(currentUrl, { headers: { ...DEFAULT_HEADERS, Referer: referer }, timeout: 8000 });
         html = res.data;
+        // axios/Node follow redirects transparently — `currentUrl` would
+        // otherwise stay at the pre-redirect address, so a 30x straight to a
+        // known host (megaplay.buzz, etc.) would be missed entirely below.
+        const resolvedUrl: string | undefined = (res.request as any)?.res?.responseUrl;
+        if (resolvedUrl && resolvedUrl !== currentUrl) {
+          log('resolveAnikotoEmbed: followed redirect', { from: currentUrl, to: resolvedUrl });
+          currentUrl = resolvedUrl;
+        }
       } catch (err) {
         log('resolveAnikotoEmbed: unknown-host fetch threw', { currentUrl, ...errInfo(err) });
         return null;
