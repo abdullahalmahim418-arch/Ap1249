@@ -32,8 +32,8 @@ app.use('/api', limiter);
 app.use('/api', routes);
 
 // ── Index page password protection ──────────────────────────────────────────
-// Set INDEX_PASSWORD in Railway → Variables to enable.
-// If unset, the index page is publicly accessible.
+// Set INDEX_PASSWORD in your Railway environment variables to enable.
+// If the env var is not set, the index page is publicly accessible.
 const INDEX_PASSWORD = process.env.INDEX_PASSWORD;
 
 const LOGIN_PAGE = `<!DOCTYPE html>
@@ -132,52 +132,44 @@ const LOGIN_PAGE = `<!DOCTYPE html>
 </body>
 </html>`;
 
-// Simple in-memory session store
+// Simple session store (in-memory; survives restarts on Railway's single instance)
 const activeSessions = new Set<string>();
 
 function generateToken(): string {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-// Parse cookies without any external dependency
-function parseCookies(cookieHeader: string | undefined): Record<string, string> {
-  if (!cookieHeader) return {};
-  return Object.fromEntries(
-    cookieHeader.split(';').map(c => {
-      const [k, ...v] = c.trim().split('=');
-      return [k.trim(), decodeURIComponent(v.join('='))];
-    })
-  );
-}
-
 // Login endpoint
-app.post('/auth/login', (req, res) => {
-  if (!INDEX_PASSWORD) return res.status(200).json({ ok: true });
+app.post('/auth/login', express.json(), (req, res) => {
+  if (!INDEX_PASSWORD) return res.status(200).json({ ok: true }); // no password set
   const { password } = req.body ?? {};
   if (password === INDEX_PASSWORD) {
     const token = generateToken();
     activeSessions.add(token);
-    res.setHeader('Set-Cookie', `av_session=${token}; HttpOnly; SameSite=Lax; Path=/`);
+    res.cookie('av_session', token, { httpOnly: true, sameSite: 'lax' });
     return res.json({ ok: true });
   }
   return res.status(401).json({ error: 'Invalid password' });
 });
 
 // Logout endpoint
-app.get('/auth/logout', (req, res) => {
-  const token = parseCookies(req.headers.cookie).av_session;
+app.get('/auth/logout', (_req, res) => {
+  const token = _req.cookies?.av_session;
   if (token) activeSessions.delete(token);
-  res.setHeader('Set-Cookie', 'av_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
+  res.clearCookie('av_session');
   res.redirect('/');
 });
 
 // Middleware: protect index page when INDEX_PASSWORD is set
 function indexGuard(req: express.Request, res: express.Response, next: express.NextFunction) {
-  if (!INDEX_PASSWORD) return next();
-  const token = parseCookies(req.headers.cookie).av_session;
+  if (!INDEX_PASSWORD) return next(); // password protection disabled
+  const token = req.cookies?.av_session;
   if (token && activeSessions.has(token)) return next();
   return res.status(401).send(LOGIN_PAGE);
 }
+
+// Parse cookies
+app.use(require('cookie-parser')());
 
 // Serve static docs/tester (protected)
 app.use(indexGuard, express.static(path.join(__dirname, '../public')));
