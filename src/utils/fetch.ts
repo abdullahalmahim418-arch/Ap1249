@@ -1,13 +1,6 @@
 import axios, { AxiosInstance } from 'axios';
 
-// Keep UA in lockstep with the version string in SEC_CH_UA below.
-// CF bot detection cross-checks these, so they must agree.
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36';
-
-// Sec-CH-UA client hints — required by modern CF bot checks. Missing these
-// causes CF to fingerprint the request as non-browser and 403 it even when
-// the UA string looks legitimate.
-const SEC_CH_UA = '"Google Chrome";v="137", "Not/A)Brand";v="8", "Chromium";v="137"';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 // FlareSolverr endpoint — set FLARESOLVERR_URL in your Railway environment variables.
 // Deploy FlareSolverr as a separate Railway service:
@@ -65,9 +58,6 @@ export function makeClient(baseURL: string, referer: string, extra?: Record<stri
       'Referer': referer,
       'Origin': new URL(referer).origin,
       'X-Requested-With': 'XMLHttpRequest',
-      'Sec-CH-UA': SEC_CH_UA,
-      'Sec-CH-UA-Mobile': '?0',
-      'Sec-CH-UA-Platform': '"Windows"',
       ...extra,
     },
   });

@@ -47,24 +47,9 @@ export async function getEpisodes(animeId: string): Promise<SenshiEpisode[]> {
   const cached = cacheGet<SenshiEpisode[]>(cacheKey);
   if (cached) return cached;
 
-  let res: any;
-  try {
-    res = await http.get(`/episodes/${animeId}`, {
-      headers: { Accept: 'application/json' },
-    });
-  } catch (err: any) {
-    const status = err?.response?.status;
-    // 403 almost always means Cloudflare blocked the request.
-    // Throw a descriptive error so watchHandler surfaces a 503 instead of a
-    // cryptic "Stream fetch failed / AxiosError: 403".
-    if (status === 403) {
-      throw new Error(
-        `senshi.live blocked the episode list request with 403 — ` +
-        `CF protection is active. Set FLARESOLVERR_URL in Railway env vars to bypass.`
-      );
-    }
-    throw err;
-  }
+  const res = await http.get(`/episodes/${animeId}`, {
+    headers: { Accept: 'application/json' },
+  });
 
   const rows = Array.isArray(res.data) ? res.data : [];
   const episodes: SenshiEpisode[] = rows
@@ -104,21 +89,9 @@ function resolveEmbedType(embed: any): 'sub' | 'dub' | 'raw' {
 export async function getServers(episodeId: string): Promise<SenshiServer[]> {
   if (episodeId.includes(':')) {
     const [animeId, epNum] = episodeId.split(':');
-    let res: any;
-    try {
-      res = await http.get(`/episode-embeds/${animeId}/${epNum}`, {
-        headers: { Accept: 'application/json' },
-      });
-    } catch (err: any) {
-      const status = err?.response?.status;
-      if (status === 403) {
-        throw new Error(
-          `senshi.live blocked the server list request with 403 — ` +
-          `CF protection is active. Set FLARESOLVERR_URL in Railway env vars to bypass.`
-        );
-      }
-      throw err;
-    }
+    const res = await http.get(`/episode-embeds/${animeId}/${epNum}`, {
+      headers: { Accept: 'application/json' },
+    });
     const embeds = Array.isArray(res.data) ? res.data : [];
 
     return embeds

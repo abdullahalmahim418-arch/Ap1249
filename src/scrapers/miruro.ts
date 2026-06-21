@@ -220,19 +220,24 @@ export async function getMiruroEmbedUrl(sourceId: string): Promise<MiruroEmbedRe
     const streams = data?.streams;
     if (!Array.isArray(streams) || streams.length === 0) return null;
 
-    // Hard-filter to HLS streams first.
-    // Accept type === 'hls', type === 'm3u8', and any URL that looks like an
-    // m3u8 playlist even when the type field is absent or uses a different
-    // label — the Miruro pipe has been observed returning 'video', undefined,
-    // or omitting the field entirely on valid master playlists.
-    const looksLikeHls = (s: any) =>
-      typeof s?.url === 'string' &&
-      /^https?:\/\//i.test(s.url) &&
-      (s?.type === 'hls' ||
-        s?.type === 'm3u8' ||
-        (s?.type !== 'embed' && s?.type !== 'iframe' && /\.m3u8(\?|$)/i.test(s.url)));
-
-    const hlsStreams = streams.filter(looksLikeHls);
+    // Several providers (bonk, bee, ...) mix `type: "embed"` entries (links to
+    // a player *page*, not a playlist) into the same `streams` array alongside
+    // the real `type: "hls"` master.m3u8. The old filter only checked that
+    // `url` was an absolute http(s) string, so embed-page URLs passed through
+    // and could outrank or tie with the actual HLS stream once `isActive`/
+    // `quality` were absent on both (this is exactly what was happening to
+    // bonk-dub and bee-dub: a correct HLS stream existed in `streams[0]` but
+    // an embed URL sometimes won the sort and got returned as if it were the
+    // m3u8, which obviously fails to play). We must hard-filter to HLS first;
+    // an embed-page URL is never usable as the embedUrl we hand back here.
+    //
+    // We do NOT probe/prefetch the chosen URL — referer-sensitive or
+    // single-use signed URLs can get consumed or invalidated by a preflight
+    // GET, making them unplayable by the time the client requests them. Trust
+    // the URL as-is and let the HLS proxy handle it.
+    const hlsStreams = streams.filter(
+      (s) => typeof s?.url === 'string' && /^https?:\/\//i.test(s.url) && s?.type === 'hls'
+    );
 
     // Fall back to non-hls only if the provider genuinely returned no hls
     // stream at all (so callers at least get *something*, even if it'll need
@@ -257,33 +262,22 @@ export async function getMiruroEmbedUrl(sourceId: string): Promise<MiruroEmbedRe
     const best = sorted[0];
     if (!best) return null;
 
-    // Referer resolution order (most specific → least specific):
-    //   1. A referer field directly on the chosen stream object (most reliable)
-    //   2. Per-stream headers object on the stream (pipe sometimes nests it here)
-    //   3. Top-level headers the pipe returns alongside `streams`
-    //   4. The stream URL's own origin — CDNs commonly whitelist self-origin
-    //      requests, so this is a safe fallback that avoids sending no Referer
-    //      at all (which causes a silent 403 on CDN segment fetches).
-    //
-    // Note: we intentionally do NOT fall back to miruro.tv here. Each CDN
-    // enforces its own Referer check; sending the wrong domain causes 403 on
-    // every segment, which is worse than sending none at all.
+    // The Referer/Origin a CDN expects is provider-specific, NOT miruro.tv —
+    // bonk/kiwi/bee/moo/etc. are separate edge hosts that 403 a request carrying
+    // the wrong Referer (this was the root cause of "source returned but won't
+    // play": every embed without a per-stream referer was silently defaulting
+    // to miruro.tv downstream, which most CDNs reject). Resolution order:
+    //   1. a referer on the stream itself
+    //   2. provider-level headers the pipe returns alongside `streams`
+    //   3. undefined — leave it unset rather than guess a domain that's wrong
+    //      for this provider; many CDNs are fine with no Referer at all, but
+    //      none are fine with the *wrong* one.
     const headerReferer =
       data?.headers?.Referer ?? data?.headers?.referer ?? data?.headers?.Origin ?? data?.headers?.origin;
 
-    const streamHeaders = best.headers as Record<string, string> | undefined;
-    const streamHeaderReferer =
-      streamHeaders?.Referer ?? streamHeaders?.referer ?? streamHeaders?.Origin ?? streamHeaders?.origin;
-
-    const urlOriginFallback = (() => {
-      try { return new URL(best.url).origin + '/'; } catch { return undefined; }
-    })();
-
     const referer =
       (typeof best.referer === 'string' && best.referer) ||
-      (typeof streamHeaderReferer === 'string' && streamHeaderReferer) ||
       (typeof headerReferer === 'string' && headerReferer) ||
-      urlOriginFallback ||
       undefined;
 
     return {
