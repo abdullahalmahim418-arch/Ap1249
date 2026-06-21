@@ -28,6 +28,11 @@ function proxiedVideoUrl(req: Request, url: string): string {
   return `${publicBase(req)}/api/proxy/video?url=${encodeURIComponent(url)}`;
 }
 
+function proxiedSubtitleUrl(req: Request, url: string, ref?: string): string {
+  const refParam = ref ? `&ref=${encodeURIComponent(ref)}` : '';
+  return `${publicBase(req)}/api/proxy/subtitle?url=${encodeURIComponent(url)}${refParam}`;
+}
+
 function rewriteHlsPlaylist(req: Request, body: string, sourceUrl: string, ref?: string): string {
   const base = new URL(sourceUrl);
   return body
@@ -313,7 +318,17 @@ async function watchHandler(req: Request, res: Response) {
         hlsProxyUrl: embedResult.m3u8 ? proxiedHlsUrl(req, embedResult.m3u8, embedResult.referer) : null,
         playbackMode: embedResult.m3u8 ? 'hls' : 'iframe',
         iframeOnly: !embedResult.m3u8,
-        subtitles: embedResult.subtitles ?? [],
+        subtitles: (embedResult.subtitles ?? []).map((s: any) => ({
+          ...s,
+          // Subtitle VTT files live on the same CDNs as the HLS stream
+          // (megacloud.blog, megaplay.buzz, etc.) and require the same
+          // Referer/Origin the embed page expects. The browser cannot set
+          // those headers for cross-origin fetches, so raw CDN URLs get
+          // rejected with 403. Route them through the subtitle proxy which
+          // injects the correct headers — mirroring what proxiedHlsUrl does
+          // for the video stream.
+          url: s.url ? proxiedSubtitleUrl(req, s.url, embedResult.referer) : s.url,
+        })),
         intro: null,
         outro: null,
         note: embedResult.m3u8 ? null : 'No m3u8 extracted — use embedUrl in an iframe.',
@@ -443,6 +458,45 @@ router.get('/proxy/video', async (req: Request, res: Response) => {
     return upstream.data.pipe(res);
   } catch (e: any) {
     return res.status(e?.response?.status || 502).json({ error: 'Video proxy failed', detail: e?.message || String(e) });
+  }
+});
+
+// Subtitle proxy: fetches VTT/WebVTT files from CDNs that enforce Referer/Origin
+// checks (megacloud.blog, megaplay.buzz, etc.). The browser cannot set these
+// headers for cross-origin fetches, so they must be proxied server-side — the
+// same reason the HLS stream goes through /proxy/hls.
+router.get('/proxy/subtitle', async (req: Request, res: Response) => {
+  const url = req.query.url as string | undefined;
+  const ref = req.query.ref as string | undefined;
+  if (!url) return res.status(400).json({ error: 'Missing ?url=' });
+  if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: '?url must be absolute http(s)' });
+
+  let referer: string | undefined;
+  let origin: string | undefined;
+  if (ref && /^https?:\/\//i.test(ref)) {
+    referer = ref;
+    try { origin = new URL(ref).origin; } catch { /* ignore */ }
+  }
+
+  try {
+    const upstream = await axios.get(url, {
+      responseType: 'text',
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        'Accept': 'text/vtt,text/plain,*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        ...(referer ? { Referer: referer } : {}),
+        ...(origin ? { Origin: origin } : {}),
+      },
+    });
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+    return res.send(upstream.data);
+  } catch (e: any) {
+    return res.status(e?.response?.status || 502).json({ error: 'Subtitle proxy failed', detail: e?.message || String(e) });
   }
 });
 
