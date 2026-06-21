@@ -295,9 +295,10 @@ async function watchHandler(req: Request, res: Response) {
     }
 
     // Anikoto's embed resolution (getAnikotoEmbedUrl) already fully resolves
-    // the stream internally — Megacloud/Megaplay decryption for regular
-    // servers, or a direct CDN m3u8 for the Kiwi Mapper side-channel — so,
-    // like Miruro, it skips the generic resolveEmbed() fallback below.
+    // the stream internally — Megacloud/Megaplay decryption for its regular
+    // servers — so, like Miruro, it skips the generic resolveEmbed() fallback
+    // below. (Anikoto's own Kiwi Mapper side-channel was removed; the miruro
+    // scraper already covers a kiwi provider, no need to resolve it twice.)
     if (source === 'anikoto') {
       return res.json({
         anilistId: siteIds.anilistId,
