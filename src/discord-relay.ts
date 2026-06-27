@@ -14,6 +14,10 @@
 
 import { Router, Request, Response } from 'express';
 import axios from 'axios';
+import https from 'https';
+
+// InfinityFree uses a self-signed / unverifiable SSL cert — bypass verification
+const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const router = Router();
 
@@ -67,6 +71,7 @@ router.get('/user-lookup', async (req: Request, res: Response) => {
                 secret: process.env.BOT_SECRET,
             },
             timeout: 8000,
+            httpsAgent,
         });
         return res.status(response.status).json(response.data);
     } catch (err: any) {
