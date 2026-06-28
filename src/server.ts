@@ -8,12 +8,6 @@ import discordRelay from './discord-relay';
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000');
 
-// Railway (and most PaaS hosts) sit behind a reverse proxy that sets
-// X-Forwarded-For. Without this, Express doesn't trust that header, and
-// express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR on every
-// /api request — which was breaking requests before they ever reached the
-// route handlers (senshi servers/embeds included). `1` trusts exactly one
-// hop (the platform's own proxy), which is correct for Railway's setup.
 app.set('trust proxy', 1);
 
 app.use(cors());
@@ -47,6 +41,19 @@ app.listen(PORT, () => {
   console.log(`\n🟢 AniVault API running on http://localhost:${PORT}`);
   console.log(`📄 Docs + Tester: http://localhost:${PORT}/`);
   console.log(`🔗 API base:      http://localhost:${PORT}/api\n`);
+
+  // Keep FlareSolverr alive on Render free tier (sleeps after 15min inactivity)
+  const flaresolverrUrl = process.env.FLARESOLVERR_URL;
+  if (flaresolverrUrl) {
+    const ping = () => {
+      fetch(flaresolverrUrl)
+        .then(() => console.log('[pinger] FlareSolverr alive ✅'))
+        .catch((e: any) => console.warn('[pinger] FlareSolverr ping failed:', e.message));
+    };
+    ping(); // ping immediately on startup
+    setInterval(ping, 9 * 60 * 1000); // then every 9 minutes
+    console.log(`🏓 FlareSolverr pinger active → ${flaresolverrUrl}`);
+  }
 });
 
 export default app;
