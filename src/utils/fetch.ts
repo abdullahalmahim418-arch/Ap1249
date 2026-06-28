@@ -2,29 +2,33 @@ import axios, { AxiosInstance } from 'axios';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// FlareSolverr endpoint — set FLARESOLVERR_URL in your Railway environment variables.
-// Deploy FlareSolverr as a separate Railway service:
-//   Docker image: ghcr.io/flaresolverr/flaresolverr:latest
-//   Expose port 8191
-// Then set FLARESOLVERR_URL=http://<your-flaresolverr-service>:8191
 const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || '';
 
-// Cache the CF clearance cookie+UA per domain so we don't call FlareSolverr on every request
+// Cache CF clearance cookies per domain for 25 minutes
 const cfCache = new Map<string, { cookies: string; userAgent: string; expiresAt: number }>();
 
-async function getCfClearance(url: string): Promise<{ cookies: string; userAgent: string } | null> {
+async function getCfClearance(baseURL: string): Promise<{ cookies: string; userAgent: string } | null> {
   if (!FLARESOLVERR_URL) return null;
 
-  const domain = new URL(url).hostname;
+  let domain: string;
+  try {
+    domain = new URL(baseURL).hostname;
+  } catch {
+    return null;
+  }
+
+  // Return cached cookies if still valid
   const cached = cfCache.get(domain);
   if (cached && cached.expiresAt > Date.now()) {
+    console.log(`[FlareSolverr] Using cached cookies for ${domain} (expires in ${Math.round((cached.expiresAt - Date.now()) / 1000)}s)`);
     return { cookies: cached.cookies, userAgent: cached.userAgent };
   }
 
+  console.log(`[FlareSolverr] Solving challenge for ${domain}...`);
   try {
     const res = await axios.post(`${FLARESOLVERR_URL}/v1`, {
       cmd: 'request.get',
-      url,
+      url: baseURL,
       maxTimeout: 60000,
     }, { timeout: 70000 });
 
@@ -36,8 +40,9 @@ async function getCfClearance(url: string): Promise<{ cookies: string; userAgent
       .join('; ');
 
     const result = { cookies, userAgent: solution.userAgent as string };
-    // Cache for 25 minutes (CF clearance cookies last ~30min)
+    // Cache for 25 minutes
     cfCache.set(domain, { ...result, expiresAt: Date.now() + 25 * 60 * 1000 });
+    console.log(`[FlareSolverr] ✅ Cookies cached for ${domain} for 25 minutes`);
     return result;
   } catch (e) {
     console.error('[FlareSolverr] failed:', (e as Error).message);
@@ -45,8 +50,9 @@ async function getCfClearance(url: string): Promise<{ cookies: string; userAgent
   }
 }
 
-// Creates an axios instance that automatically injects CF clearance cookies
-// when FLARESOLVERR_URL is set, falling back to plain requests otherwise.
+// Creates an axios instance that injects CF clearance cookies.
+// CF clearance is fetched ONCE per domain and cached — subsequent requests
+// reuse the cached cookies without calling FlareSolverr again.
 export function makeClient(baseURL: string, referer: string, extra?: Record<string, string>): AxiosInstance {
   const instance = axios.create({
     baseURL,
@@ -62,10 +68,10 @@ export function makeClient(baseURL: string, referer: string, extra?: Record<stri
     },
   });
 
-  // Inject CF clearance before every request
+  // Inject CF clearance before every request — uses baseURL (not per-path URL)
+  // so the domain cache key is always consistent
   instance.interceptors.request.use(async (config) => {
-    const fullUrl = (config.baseURL || '') + (config.url || '');
-    const cf = await getCfClearance(fullUrl);
+    const cf = await getCfClearance(baseURL);
     if (cf) {
       config.headers['Cookie'] = cf.cookies;
       config.headers['User-Agent'] = cf.userAgent;
