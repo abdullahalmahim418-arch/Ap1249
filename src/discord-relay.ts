@@ -1,8 +1,4 @@
 // ── Discord Webhook Relay ─────────────────────────────────────────────────
-// InfinityFree (where the PHP site lives) blocks outbound AND inbound
-// requests to/from external domains and cloud IPs. So all traffic routes
-// through Railway as a middleman.
-//
 // Routes:
 //   POST /discord/relay       — PHP → Railway → Vercel bot (login/register events)
 //   GET  /discord/user-lookup — Vercel bot → Railway → PHP (user profile fetch)
@@ -22,7 +18,6 @@ const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 const router = Router();
 
 // ── POST /discord/relay ───────────────────────────────────────
-// PHP site → Railway → Vercel bot (login/register notifications)
 router.post('/relay', async (req: Request, res: Response) => {
     if (req.headers['x-bot-secret'] !== process.env.BOT_SECRET) {
         return res.status(401).json({ error: 'Unauthorized' });
@@ -73,9 +68,9 @@ router.post('/relay', async (req: Request, res: Response) => {
 });
 
 // ── GET /discord/user-lookup ──────────────────────────────────
-// Vercel bot → Railway → PHP site (user profile + stats lookup)
-// InfinityFree blocks Vercel's IPs directly, but allows Railway's —
-// so the bot calls Railway, Railway calls the PHP site, and returns the data.
+// Bypasses Content-Type sniffing entirely — InfinityFree's PHP doesn't
+// always send the correct header, so we fetch as raw text and parse
+// the JSON ourselves regardless of what header comes back.
 router.get('/user-lookup', async (req: Request, res: Response) => {
     if (req.headers['x-bot-secret'] !== process.env.BOT_SECRET) {
         return res.status(401).json({ error: 'Unauthorized' });
@@ -97,21 +92,26 @@ router.get('/user-lookup', async (req: Request, res: Response) => {
             timeout: 8000,
             httpsAgent,
             validateStatus: () => true,
+            responseType: 'text',
+            transformResponse: [(data) => data], // keep raw string, skip axios's auto-JSON
         });
 
-        const contentType = String(response.headers['content-type'] || '');
-        if (!contentType.includes('application/json')) {
+        let parsed: any;
+        try {
+            parsed = JSON.parse(response.data);
+        } catch {
             console.error(
                 `[user-lookup] PHP site returned non-JSON (${response.status}). ` +
-                `Body preview: ${String(response.data).slice(0, 150)}`
+                `Body preview: ${String(response.data).slice(0, 200)}`
             );
             return res.status(502).json({
                 error: 'PHP site returned unexpected response',
                 status: response.status,
+                bodyPreview: String(response.data).slice(0, 200),
             });
         }
 
-        return res.status(response.status).json(response.data);
+        return res.status(response.status).json(parsed);
     } catch (err: any) {
         console.error('[user-lookup] Failed to reach PHP site:', err?.message);
         return res.status(500).json({ error: 'Relay to PHP site failed', detail: err?.message });
