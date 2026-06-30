@@ -12,8 +12,16 @@ import { Router, Request, Response } from 'express';
 import axios from 'axios';
 import https from 'https';
 
-// InfinityFree's SSL cert can fail Node's strict verification — bypass it
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
+
+// InfinityFree shows a JS/AES anti-bot challenge page to requests that
+// don't look like real browsers. A standard browser UA + headers usually
+// bypasses it since InfinityFree's check is much lighter than Cloudflare's.
+const BROWSER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+};
 
 const router = Router();
 
@@ -68,9 +76,6 @@ router.post('/relay', async (req: Request, res: Response) => {
 });
 
 // ── GET /discord/user-lookup ──────────────────────────────────
-// Bypasses Content-Type sniffing entirely — InfinityFree's PHP doesn't
-// always send the correct header, so we fetch as raw text and parse
-// the JSON ourselves regardless of what header comes back.
 router.get('/user-lookup', async (req: Request, res: Response) => {
     if (req.headers['x-bot-secret'] !== process.env.BOT_SECRET) {
         return res.status(401).json({ error: 'Unauthorized' });
@@ -91,9 +96,10 @@ router.get('/user-lookup', async (req: Request, res: Response) => {
             },
             timeout: 8000,
             httpsAgent,
+            headers: BROWSER_HEADERS,
             validateStatus: () => true,
             responseType: 'text',
-            transformResponse: [(data) => data], // keep raw string, skip axios's auto-JSON
+            transformResponse: [(data) => data],
         });
 
         let parsed: any;
@@ -102,12 +108,12 @@ router.get('/user-lookup', async (req: Request, res: Response) => {
         } catch {
             console.error(
                 `[user-lookup] PHP site returned non-JSON (${response.status}). ` +
-                `Body preview: ${String(response.data).slice(0, 200)}`
+                `Body preview: ${String(response.data).slice(0, 250)}`
             );
             return res.status(502).json({
-                error: 'PHP site returned unexpected response',
+                error: 'PHP site returned unexpected response (likely InfinityFree anti-bot challenge)',
                 status: response.status,
-                bodyPreview: String(response.data).slice(0, 200),
+                bodyPreview: String(response.data).slice(0, 250),
             });
         }
 
