@@ -1,18 +1,29 @@
 // ── Discord Webhook Relay ─────────────────────────────────────────────────
-// InfinityFree (where the PHP site lives) blocks outbound curl to external
-// domains. PHP → this relay → anivault-bot.vercel.app/api/event → Discord.
+// InfinityFree (where the PHP site lives) blocks outbound AND inbound
+// requests to/from external domains and cloud IPs. So all traffic routes
+// through Railway as a middleman.
 //
-// Env vars needed (set in Vercel dashboard for the scraper deployment):
-//   VERCEL_BOT_URL  = https://anivault-bot.vercel.app
-//   BOT_SECRET      = (same secret set on the bot deployment)
+// Routes:
+//   POST /discord/relay       — PHP → Railway → Vercel bot (login/register events)
+//   GET  /discord/user-lookup — Vercel bot → Railway → PHP (user profile fetch)
+//
+// Env vars needed on Railway:
+//   VERCEL_BOT_URL = https://anivault-bot.vercel.app
+//   BOT_SECRET     = (same secret set on PHP config + Vercel bot)
+//   SITE_URL       = https://www.anivault.co
 
 import { Router, Request, Response } from 'express';
 import axios from 'axios';
+import https from 'https';
+
+// InfinityFree's SSL cert can fail Node's strict verification — bypass it
+const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const router = Router();
 
+// ── POST /discord/relay ───────────────────────────────────────
+// PHP site → Railway → Vercel bot (login/register notifications)
 router.post('/relay', async (req: Request, res: Response) => {
-    // Validate the request came from your PHP site
     if (req.headers['x-bot-secret'] !== process.env.BOT_SECRET) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -31,19 +42,15 @@ router.post('/relay', async (req: Request, res: Response) => {
                 'x-bot-secret': process.env.BOT_SECRET!,
             },
             timeout: 8000,
-            // Don't let axios throw on 4xx/5xx — we'll handle it below
             validateStatus: () => true,
         });
 
         const contentType = String(response.headers['content-type'] || '');
 
-        // If bot returned HTML instead of JSON, it means the route doesn't exist
-        // or Vercel returned a fallback/error page — surface a clear error
         if (!contentType.includes('application/json')) {
             console.error(
                 `[discord-relay] Bot returned non-JSON (${response.status}) from ${targetUrl}. ` +
-                `Content-Type: ${contentType}. ` +
-                `Body preview: ${String(response.data).slice(0, 120)}`
+                `Content-Type: ${contentType}. Body preview: ${String(response.data).slice(0, 120)}`
             );
             return res.status(502).json({
                 error: 'Bot returned unexpected response',
@@ -62,6 +69,52 @@ router.post('/relay', async (req: Request, res: Response) => {
     } catch (err: any) {
         console.error('[discord-relay] Network error reaching bot:', err?.message);
         return res.status(500).json({ error: 'Relay failed', detail: err?.message });
+    }
+});
+
+// ── GET /discord/user-lookup ──────────────────────────────────
+// Vercel bot → Railway → PHP site (user profile + stats lookup)
+// InfinityFree blocks Vercel's IPs directly, but allows Railway's —
+// so the bot calls Railway, Railway calls the PHP site, and returns the data.
+router.get('/user-lookup', async (req: Request, res: Response) => {
+    if (req.headers['x-bot-secret'] !== process.env.BOT_SECRET) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const siteUrl = process.env.SITE_URL || 'https://www.anivault.co';
+    const username = req.query.username as string;
+
+    if (!username) {
+        return res.status(400).json({ error: 'Missing username' });
+    }
+
+    try {
+        const response = await axios.get(`${siteUrl}/api/discord_user.php`, {
+            params: {
+                username,
+                secret: process.env.BOT_SECRET,
+            },
+            timeout: 8000,
+            httpsAgent,
+            validateStatus: () => true,
+        });
+
+        const contentType = String(response.headers['content-type'] || '');
+        if (!contentType.includes('application/json')) {
+            console.error(
+                `[user-lookup] PHP site returned non-JSON (${response.status}). ` +
+                `Body preview: ${String(response.data).slice(0, 150)}`
+            );
+            return res.status(502).json({
+                error: 'PHP site returned unexpected response',
+                status: response.status,
+            });
+        }
+
+        return res.status(response.status).json(response.data);
+    } catch (err: any) {
+        console.error('[user-lookup] Failed to reach PHP site:', err?.message);
+        return res.status(500).json({ error: 'Relay to PHP site failed', detail: err?.message });
     }
 });
 
