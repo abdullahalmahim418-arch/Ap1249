@@ -3,8 +3,9 @@ import { makeClient, makeAjaxClient } from '../utils/fetch';
 import { cacheGet, cacheSet } from '../utils/cache';
 
 const BASE = 'https://senshi.live';
-const http = makeClient(BASE, BASE + '/');
-const ajax = makeAjaxClient(BASE, BASE + '/');
+// Senshi is behind Cloudflare, so it needs FlareSolverr (useFlareSolverr = true)
+const http = makeClient(BASE, BASE + '/', true);
+const ajax = makeAjaxClient(BASE, BASE + '/', true);
 
 export interface SenshiEpisode {
   num: number;
