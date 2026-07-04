@@ -53,7 +53,12 @@ async function getCfClearance(baseURL: string): Promise<{ cookies: string; userA
 // Creates an axios instance that injects CF clearance cookies.
 // CF clearance is fetched ONCE per domain and cached — subsequent requests
 // reuse the cached cookies without calling FlareSolverr again.
-export function makeClient(baseURL: string, referer: string, extra?: Record<string, string>): AxiosInstance {
+//
+// `useFlareSolverr` is opt-in (defaults to false). Only pass `true` for sites
+// that are actually behind Cloudflare's bot challenge (e.g. Senshi). Sites
+// that don't need it (e.g. AnimeHeaven) should NOT set this — otherwise every
+// request pays the cost of a slow/cold FlareSolverr round trip for no reason.
+export function makeClient(baseURL: string, referer: string, useFlareSolverr: boolean = false, extra?: Record<string, string>): AxiosInstance {
   const instance = axios.create({
     baseURL,
     timeout: 15000,
@@ -68,22 +73,24 @@ export function makeClient(baseURL: string, referer: string, extra?: Record<stri
     },
   });
 
-  // Inject CF clearance before every request — uses baseURL (not per-path URL)
-  // so the domain cache key is always consistent
-  instance.interceptors.request.use(async (config) => {
-    const cf = await getCfClearance(baseURL);
-    if (cf) {
-      config.headers['Cookie'] = cf.cookies;
-      config.headers['User-Agent'] = cf.userAgent;
-    }
-    return config;
-  });
+  if (useFlareSolverr) {
+    // Inject CF clearance before every request — uses baseURL (not per-path URL)
+    // so the domain cache key is always consistent
+    instance.interceptors.request.use(async (config) => {
+      const cf = await getCfClearance(baseURL);
+      if (cf) {
+        config.headers['Cookie'] = cf.cookies;
+        config.headers['User-Agent'] = cf.userAgent;
+      }
+      return config;
+    });
+  }
 
   return instance;
 }
 
-export function makeAjaxClient(baseURL: string, referer: string, extra?: Record<string, string>): AxiosInstance {
-  return makeClient(baseURL, referer, {
+export function makeAjaxClient(baseURL: string, referer: string, useFlareSolverr: boolean = false, extra?: Record<string, string>): AxiosInstance {
+  return makeClient(baseURL, referer, useFlareSolverr, {
     'Accept': 'application/json, text/javascript, */*; q=0.01',
     ...extra,
   });
