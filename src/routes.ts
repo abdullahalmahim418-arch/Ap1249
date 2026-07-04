@@ -215,8 +215,19 @@ async function watchHandler(req: Request, res: Response) {
     const filtered = allServers.filter((s: any) => s.type === type);
     if (!filtered.length) return res.status(404).json({ error: `No ${type} stream available on ${source} for ep ${epNum}` });
 
-    if (preferredServer) {
-      filtered.sort((a: any, b: any) => {
+    // `strict=1` alongside `server=` restricts to ONLY that server (no
+    // fallback to others) — useful for testing a single server in isolation
+    // rather than the default "prefer this one, but fall back if it fails"
+    // behavior used in production playback.
+    const strict = req.query.strict === '1' || req.query.strict === 'true';
+    let candidates = filtered;
+    if (preferredServer && strict) {
+      candidates = filtered.filter((s: any) => s.name.toLowerCase().includes(preferredServer.toLowerCase()));
+      if (!candidates.length) {
+        return res.status(404).json({ error: `No server matching "${preferredServer}" found`, availableServers: filtered.map((s: any) => s.name) });
+      }
+    } else if (preferredServer) {
+      candidates = [...filtered].sort((a: any, b: any) => {
         const aM = a.name.toLowerCase().includes(preferredServer.toLowerCase()) ? -1 : 1;
         const bM = b.name.toLowerCase().includes(preferredServer.toLowerCase()) ? -1 : 1;
         return aM - bM;
@@ -225,7 +236,7 @@ async function watchHandler(req: Request, res: Response) {
 
     let embedResult: any = null;
     let usedServer = '';
-    for (const server of filtered) {
+    for (const server of candidates) {
       let raw: any = null;
       if (source === 'senshi') raw = await getEmbedUrl(server.sourceId);
       if (source === 'animeheaven') raw = await getHeavenStream(server.sourceId);
@@ -233,7 +244,10 @@ async function watchHandler(req: Request, res: Response) {
       if (source === 'anikoto') raw = await getAnikotoEmbedUrl(server.sourceId);
       if (raw) { embedResult = raw; usedServer = server.name; break; }
     }
-    if (!embedResult) return res.status(502).json({ error: 'All servers failed' });
+    if (!embedResult) {
+      const msg = strict && preferredServer ? `Server "${preferredServer}" failed to resolve a stream` : 'All servers failed';
+      return res.status(502).json({ error: msg, triedServers: candidates.map((s: any) => s.name) });
+    }
 
     if (source === 'animeheaven') {
       return res.json({
