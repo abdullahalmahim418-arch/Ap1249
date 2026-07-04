@@ -28,6 +28,11 @@ function proxiedVideoUrl(req: Request, url: string): string {
   return `${publicBase(req)}/api/proxy/video?url=${encodeURIComponent(url)}`;
 }
 
+function proxiedSubtitleUrl(req: Request, url: string, ref?: string): string {
+  const refParam = ref ? `&ref=${encodeURIComponent(ref)}` : '';
+  return `${publicBase(req)}/api/proxy/subtitle?url=${encodeURIComponent(url)}${refParam}`;
+}
+
 function rewriteHlsPlaylist(req: Request, body: string, sourceUrl: string, ref?: string): string {
   const base = new URL(sourceUrl);
   return body
@@ -313,7 +318,10 @@ async function watchHandler(req: Request, res: Response) {
         hlsProxyUrl: embedResult.m3u8 ? proxiedHlsUrl(req, embedResult.m3u8, embedResult.referer) : null,
         playbackMode: embedResult.m3u8 ? 'hls' : 'iframe',
         iframeOnly: !embedResult.m3u8,
-        subtitles: embedResult.subtitles ?? [],
+        subtitles: (embedResult.subtitles ?? []).map((s: any) => ({
+          ...s,
+          url: proxiedSubtitleUrl(req, s.url, embedResult.referer),
+        })),
         intro: null,
         outro: null,
         note: embedResult.m3u8 ? null : 'No m3u8 extracted — use embedUrl in an iframe.',
@@ -404,6 +412,57 @@ router.get('/proxy/hls', async (req: Request, res: Response) => {
     return res.send(body);
   } catch (e: any) {
     return res.status(e?.response?.status || 502).json({ error: 'HLS proxy failed', detail: e?.message || String(e) });
+  }
+});
+
+// Subtitle files (megacloud/megaplay/vidstream tracks, etc.) usually live on
+// CDNs that don't send Access-Control-Allow-Origin, so browsers refuse to
+// load them cross-origin straight from the client. We fetch server-side
+// (with the correct Referer, same as the HLS proxy) and re-serve with open
+// CORS. SRT is also converted to WEBVTT here since <track> only accepts VTT.
+router.get('/proxy/subtitle', async (req: Request, res: Response) => {
+  const url = req.query.url as string | undefined;
+  const ref = req.query.ref as string | undefined;
+  if (!url) return res.status(400).json({ error: 'Missing ?url=' });
+  if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: '?url must be absolute http(s)' });
+
+  let referer: string | undefined;
+  let origin: string | undefined;
+  if (ref && /^https?:\/\//i.test(ref)) {
+    referer = ref;
+    try {
+      origin = new URL(ref).origin;
+    } catch {
+      origin = undefined;
+    }
+  }
+
+  try {
+    const upstream = await axios.get(url, {
+      responseType: 'text',
+      transformResponse: (d) => d,
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        ...(referer ? { Referer: referer } : {}),
+        ...(origin ? { Origin: origin } : {}),
+      },
+    });
+
+    let text = String(upstream.data ?? '');
+    if (!text.trim().startsWith('WEBVTT')) {
+      // Looks like SRT (or SRT-ish) — convert timestamps (, → .) and prepend header
+      text = 'WEBVTT\n\n' + text.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+    }
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.type('text/vtt');
+    return res.send(text);
+  } catch (e: any) {
+    return res.status(e?.response?.status || 502).json({ error: 'Subtitle proxy failed', detail: e?.message || String(e) });
   }
 });
 
