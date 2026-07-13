@@ -1,9 +1,6 @@
 [build]
-builder = "nixpacks"
+builder = "RAILPACK"
 buildCommand = "npm install && npm run build"
-
-[build.nixpacksPlan.phases.setup]
-nixPkgs = ["nodejs_20"]
 
 [deploy]
 startCommand = "npm start"
