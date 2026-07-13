@@ -12,8 +12,14 @@
 //   FTP_HOST         = ftpupload.net  (from InfinityFree's FTP Details page)
 //   FTP_USER         = your InfinityFree FTP username
 //   FTP_PASSWORD     = your InfinityFree FTP password
-//   FTP_REMOTE_DIR   = /htdocs/assets/img/anime-library
+//   FTP_REMOTE_DIR   = /anivault.co/htdocs/assets/img/anime-library
 //   MIGRATE_ACCESS_KEY = any password you make up, keeps this endpoint private
+//
+// NOTE: the file list comes from anime-image-manifest.json (generated from
+// the anime_images DB table), NOT from an FTP directory listing. InfinityFree's
+// FTP server silently truncates `LIST` output on directories this large
+// (was returning ~5,000 of 12,474 files), so we bake in the exact expected
+// filenames instead and only use FTP for the actual per-file downloads.
 //
 // DELETE THIS FILE (and remove the app.use('/migrate-images', ...) line in
 // server.ts) once the migration is done — it holds FTP creds in env vars.
@@ -22,6 +28,7 @@ import { Router, Request, Response } from 'express';
 import { Client } from 'basic-ftp';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
+import manifest from './anime-image-manifest.json';
 
 const FTP_HOST = process.env.FTP_HOST || '';
 const FTP_USER = process.env.FTP_USER || '';
@@ -43,31 +50,13 @@ function checkKey(req: Request, res: Response): boolean {
 
 interface RemoteFile {
   name: string;
-  size: number;
+  anime_id: string;
 }
 
-// Cache the remote listing for 5 minutes so we're not re-listing on every request.
-let cachedList: RemoteFile[] | null = null;
-let cachedAt = 0;
-
-async function getFileList(): Promise<RemoteFile[]> {
-  const now = Date.now();
-  if (cachedList && now - cachedAt < 5 * 60 * 1000) return cachedList;
-
-  const client = new Client();
-  client.ftp.verbose = false;
-  try {
-    await client.access({ host: FTP_HOST, user: FTP_USER, password: FTP_PASSWORD, secure: false });
-    const list = await client.list(FTP_REMOTE_DIR);
-    cachedList = list
-      .filter((f) => f.isFile)
-      .map((f) => ({ name: f.name, size: f.size }))
-      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-    cachedAt = now;
-    return cachedList;
-  } finally {
-    client.close();
-  }
+function getFileList(): RemoteFile[] {
+  return (manifest as { anime_id: string; filename: string }[])
+    .map((m) => ({ name: m.filename, anime_id: m.anime_id }))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 }
 
 async function downloadToBuffer(client: Client, remotePath: string): Promise<Buffer> {
@@ -85,21 +74,13 @@ async function downloadToBuffer(client: Client, remotePath: string): Promise<Buf
 
 const router = Router();
 
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', (req: Request, res: Response) => {
   if (!checkKey(req, res)) return;
 
-  let files: RemoteFile[];
-  try {
-    files = await getFileList();
-  } catch (err: any) {
-    return res.status(500).send('FTP list failed: ' + err.message);
-  }
-
+  const files = getFileList();
   const batchSize = Math.max(50, Math.min(2000, parseInt(String(req.query.size), 10) || 1000));
   const total = files.length;
   const batchCount = Math.ceil(total / batchSize);
-  const totalBytes = files.reduce((sum, f) => sum + (f.size || 0), 0);
-  const fmt = (b: number) => (b >= 1073741824 ? (b / 1073741824).toFixed(2) + ' GB' : (b / 1048576).toFixed(1) + ' MB');
   const key = encodeURIComponent(String(req.query.key));
 
   let batchLinks = '';
@@ -126,10 +107,9 @@ router.get('/', async (req: Request, res: Response) => {
     .note{background:#14241c;border:1px solid #1f4a30;color:#8ae0a8;border-radius:8px;padding:.8rem 1rem;font-size:.85rem;}
   </style></head><body><div class="wrap">
   <h1>AniVault Image Migrator</h1>
-  <div class="note">Pulling over FTP from InfinityFree \u2014 this does not touch your InfinityFree Hits or CPU quota. Zips are built here on Railway and streamed to you.</div>
+  <div class="note">File list comes from the DB manifest (not FTP listing, which truncates on this host) \u2014 this does not touch your InfinityFree Hits or CPU quota. Zips are built here on Railway and streamed to you.</div>
   <div class="stats">
     <div class="stat"><b>${total.toLocaleString()}</b>Images</div>
-    <div class="stat"><b>${fmt(totalBytes)}</b>Total size</div>
     <div class="stat"><b>${batchCount}</b>Batches @ ${batchSize}/zip</div>
   </div>
   <div class="grid">${batchLinks}</div>
@@ -142,13 +122,7 @@ router.get('/batch', async (req: Request, res: Response) => {
   const batchSize = Math.max(50, Math.min(2000, parseInt(String(req.query.size), 10) || 1000));
   const batch = Math.max(1, parseInt(String(req.query.batch), 10) || 1);
 
-  let files: RemoteFile[];
-  try {
-    files = await getFileList();
-  } catch (err: any) {
-    return res.status(500).send('FTP list failed: ' + err.message);
-  }
-
+  const files = getFileList();
   const offset = (batch - 1) * batchSize;
   const slice = files.slice(offset, offset + batchSize);
   if (slice.length === 0) return res.status(404).send('Batch out of range.');
@@ -184,20 +158,14 @@ router.get('/batch', async (req: Request, res: Response) => {
   await archive.finalize();
 });
 
-router.get('/manifest', async (req: Request, res: Response) => {
+router.get('/manifest', (req: Request, res: Response) => {
   if (!checkKey(req, res)) return;
-  let files: RemoteFile[];
-  try {
-    files = await getFileList();
-  } catch (err: any) {
-    return res.status(500).send('FTP list failed: ' + err.message);
-  }
+  const files = getFileList();
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="anivault-images-manifest.csv"');
-  let csv = 'filename,anime_id,size_bytes\n';
+  let csv = 'filename,anime_id\n';
   for (const f of files) {
-    const m = f.name.match(/^anime-(\d+)\.\w+$/i);
-    csv += `${f.name},${m ? m[1] : ''},${f.size}\n`;
+    csv += `${f.name},${f.anime_id}\n`;
   }
   res.send(csv);
 });
